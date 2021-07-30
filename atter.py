@@ -65,7 +65,11 @@ class Atter(object):
 
     def run(self):
 
+        previous = time.time()
         while True:
+            before = time.time()
+            log(f'running first one since: {before - previous}s')
+            previous = before
             self.run_one()
             next_ = min(self.todos.keys()) if self.todos else None
             if next_ is None:
@@ -73,7 +77,11 @@ class Atter(object):
             now = self.time()
             wait = max(next_ - now, 0)
             next_utc = datetime.datetime.utcfromtimestamp(next_).astimezone(self.tz)
-            log(f'waiting for {wait}s [until {dt_to_string(next_utc)}]')
+            next_utc_str = dt_to_string(next_utc)
+            log_str = f'waiting for {wait}s [until {next_utc_str}]'
+            after = time.time()
+            wait = max(0, wait + (after - before))
+            log(log_str)
             time.sleep(wait)
 
 
@@ -201,7 +209,9 @@ def main(args, cmd_args):
         
     hour = int(hour) % 24
     minute = int(minute) % 60
-    second = int(second) % 60
+    second = int(second)
+    if len(hour_minute_second) != 1:
+        second = int(second) % 60
 
     log(f'waiting until {"+" if plus else ""}{hour}:{minute}:{second}')
 
@@ -232,10 +242,10 @@ def main(args, cmd_args):
     atter = Atter(tz)
 
     if args.type == Types.ExecRepeat.value:
-        reppy = make_exec_repeater(cmd_args, interval)
+        reppy = make_exec_repeater(cmd_args, interval, name=args.name)
         atter.add(start, reppy)
     elif args.type == Types.ExecOneoff.value:
-        reppy = make_exec_oneoff(cmd_args)
+        reppy = make_exec_oneoff(cmd_args, name=args.name)
         atter.add(start, reppy)
 
     try:
@@ -251,6 +261,7 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser(description='Do things at.')
+    parser.add_argument('--name', type=str, default='unnamed', help='Name of what.')
     parser.add_argument('--start', type=str, default='+1', help='When to first at.')
     parser.add_argument('--type', choices=Types.values(), default='exec-oneoff', help='Way of doing things.')
     parser.add_argument('--tz', type=str, default='UTC', help='Timezone string.')
