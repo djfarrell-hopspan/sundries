@@ -1,4 +1,5 @@
 
+import functools
 import hashlib
 import hmac
 import os
@@ -9,10 +10,10 @@ import tempfile
 import utils
 
 
-log = print
-logw = print
-loge = print
-logd = print
+log =  functools.partial(print, 'info   :')
+logw = functools.partial(print, 'warning:')
+loge = functools.partial(print, 'error  :')
+logd = functools.partial(print, 'debug  :')
 
 
 def sign(name, data):

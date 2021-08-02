@@ -1,6 +1,7 @@
 
 import binascii
 from enum import Enum
+import functools
 import os
 import random
 import socket
@@ -589,10 +590,10 @@ def main(sys_args, *args, **kwargs):
     return 1
 
 
-log = print
-logw = print
-loge = print
-logd = print
+log =  functools.partial(print, 'info   :')
+logw = functools.partial(print, 'warning:')
+loge = functools.partial(print, 'error  :')
+logd = functools.partial(print, 'debug  :')
 
 
 if __name__ == '__main__':

@@ -1,11 +1,12 @@
 
+import functools
 import os
 
 
-log = print
-logw = print
-loge = print
-logd = print
+log =  functools.partial(print, 'info   :')
+logw = functools.partial(print, 'warning:')
+loge = functools.partial(print, 'error  :')
+logd = functools.partial(print, 'debug  :')
 
 
 def safe_remove(fname):
