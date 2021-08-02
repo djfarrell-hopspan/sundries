@@ -10,6 +10,9 @@ import utils
 
 
 log = print
+logw = print
+loge = print
+logd = print
 
 
 def sign(name, data):
@@ -25,9 +28,9 @@ def sign(name, data):
             signature = signer.stdout.read()
             signer.wait(timeout=1.)
     except subprocess.TimeoutExpired as e:
-        log(f'error error: {e}')
+        loge(f'error error: {e}')
     except Exception as e:
-        log(f'signer error: {e}')
+        loge(f'signer error: {e}')
 
     return signature
 
@@ -44,7 +47,7 @@ def verify(name, signature, data):
             sig_file.write(signature)
             sig_file.seek(0)
         except Exception as e:
-            log(f'tempfile error: {e}')
+            loge(f'tempfile error: {e}')
         try:
             with subprocess.Popen(['openssl', 'dgst', '-sha256', '-verify', f'{name}_public.pem', '-binary', '-signature', f'{sig_file.name}'], stdin=subprocess.PIPE, stdout=subprocess.PIPE) as verifier:
                 verifier.stdin.write(data)
@@ -53,9 +56,9 @@ def verify(name, signature, data):
                 verifier.wait(timeout=1.)
                 verified = verifier.returncode == 0
         except subprocess.TimeoutExpired as e:
-            log(f'verifier error: {e}: {verifier_out}')
+            loge(f'verifier error: {e}: {verifier_out}')
         except Exception as e:
-            log(f'verifier error: {e}: {verifier_out}')
+            loge(f'verifier error: {e}: {verifier_out}')
 
     return verified
 
@@ -76,9 +79,9 @@ def make_temporal_me_to_them(me_name, them_name):
         if isinstance(ret, str):
             ret = ret.encode()
     except subprocess.CalledProcessError as e:
-        log(f'making temporal key error: {e}')
+        loge(f'making temporal key error: {e}')
     except Exception as e:
-        log(f'making temporal key error: {e}')
+        loge(f'making temporal key error: {e}')
 
     return ret
 
@@ -110,10 +113,10 @@ def derive_temporal_key(them_name, me_name):
             deriver.wait(timeout=1.)
             deriver = deriver.returncode == 0
     except subprocess.TimeoutExpired as e:
-        log(f'deriver error: {e}: {deriver_out}')
+        loge(f'deriver error: {e}: {deriver_out}')
         deriver_out = None
     except Exception as e:
-        log(f'deriver error: {e}: {deriver_out}')
+        loge(f'deriver error: {e}: {deriver_out}')
         deriver_out = None
 
     return deriver_out
