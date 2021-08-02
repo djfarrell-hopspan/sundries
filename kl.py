@@ -605,12 +605,13 @@ if __name__ == '__main__':
     parser.add_argument('--rdir', type=str, default='./', help='Where to operate.')
     parser.add_argument('--mode', choices=Modes.values(), default=Modes.Server.value, help='Mode of the loader.')
     parser.add_argument('--iface', type=str, default='', help='Interface to use.')
+    parser.add_argument('--debug', default=False, action='store_true', help='Enable debug printing.')
 
     args = parser.parse_args(sys.argv[1:])
 
     log_formatter = logging.Formatter("%(asctime)s [%(threadName)-12.12s] [%(levelname)-5.5s] " + args.name + " %(message)s")
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
+    root_logger.setLevel(logging.INFO if not args.debug else logging.DEBUG)
 
     file_handler = logging.FileHandler(f'kl-{args.name}-{os.getpid()}.log')
     file_handler.setFormatter(log_formatter)
