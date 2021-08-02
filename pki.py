@@ -6,7 +6,11 @@ import shlex
 import subprocess
 import tempfile
 
+import utils
+
+
 log = print
+
 
 def sign(name, data):
 
@@ -62,15 +66,8 @@ def make_temporal_me_to_them(me_name, them_name):
     public_name = f'{me_name}_{them_name}_public.pem'
     ret = None
 
-    try:
-        os.remove(private_name)
-        os.remove(public_name)
-    except IOError as e:
-        log(f'make temporal: rm: {e}')
-    except OSError as e:
-        log(f'make temporal: rm: {e}')
-    except Exception as e:
-        log(f'make temporal: rm: {e}')
+    utils.safe_remove(private_name)
+    utils.safe_remove(public_name)
 
     try:
         subprocess.check_call(shlex.split(f'openssl ecparam -genkey -name secp384r1 -noout -out {private_name}'))

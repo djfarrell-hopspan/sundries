@@ -11,6 +11,8 @@ import tempfile
 import time
 
 import pki
+import utils
+
 
 def urandom(num_bytes):
 
@@ -566,6 +568,7 @@ def main(sys_args, *args, **kwargs):
 
     log(f'main({sys_args})')
     pki.log = log
+    utils.log = log
 
     mode = Modes(sys_args.mode)
     mode_runner = ModesRun.get(mode.value)
