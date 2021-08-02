@@ -8,7 +8,9 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 
+import pki
 
 def urandom(num_bytes):
 
@@ -97,54 +99,6 @@ class Modes(EnumHelper):
     Client = 'client'
 
 
-def openssl_sign(name, data):
-
-    signature = None
-    if isinstance(data, str):
-        data = data.encode()
-
-    try:
-        with subprocess.Popen(['openssl', 'dgst', '-sha256', '-sign', f'{name}private.pem'], stdin=subprocess.PIPE, stdout=subprocess.PIPE) as signer:
-            signer.stdin.write(data)
-            signer.stdin.close()
-            signature = signer.stdout.read()
-            signer.wait(timeout=1.)
-    except Subprocess.TimeoutExpired as e:
-        log(f'error error: {e}')
-    except Exception as e:
-        log(f'signer error: {e}')
-
-    return signature
-
-
-def openssl_verify(name, signature, data):
-
-    verified = False
-    if isinstance(data, str):
-        data = data.encode()
-
-    verifier_out = '(none)'
-    with tempfile.NamedTemporaryFile(mode='wb', buffering=0) as sig_file:
-        try:
-            sig_file.write(signature)
-            sig_file.seek(0)
-        except Exception as e:
-            log(f'tempfile error: {e}')
-        try:
-            with subprocess.Popen(['openssl', 'dgst', '-sha256', '-verify', f'{name}public.pem', '-binary', '-signature', f'{sig_file.name}'], stdin=subprocess.PIPE, stdout=subprocess.PIPE) as verifier:
-                verifier.stdin.write(data)
-                verifier.stdin.close()
-                verifier_out = verifier.stdout.read()
-                verifier.wait(timeout=1.)
-                verified = verifier.returncode == 0
-        except Subprocess.TimeoutExpired as e:
-            log(f'verifier error: {e}: {verifier_out}')
-        except Exception as e:
-            log(f'verifier error: {e}: {verifier_out}')
-
-    return verified
-
-
 def decode_base64(data):
 
     ret = None
@@ -166,9 +120,16 @@ class KernelLoader(object):
     etype_len = len(etype_b)
     eaddr_len = len(bcast)
     ehdr_len = eaddr_len * 2 + etype_len
+    pkv_cmds = {b'hello', b'hello_ack', b'hello_done'}
     core_msg = {b'type', b'mac', b'nonce', b'signature', b'name'}
 
     def __init__(self, name, iface):
+
+        # to -> temporal key
+        self.tkeys_to = dict()
+        self.tkeys_from = dict()
+        # (from, to) -> shared key
+        self.skeys = dict()
 
         self.name = name
         self.iface = iface
@@ -186,18 +147,49 @@ class KernelLoader(object):
 
         return self.so.send(pkt)
 
-    def send_kv(self, dst, tmsg):
+    def send_kv(self, dst, cmd, tmsg):
+
+        if isinstance(cmd, str):
+            cmd = cmd.encode()
 
         bmsg = dict()
         bmsg[b'mac'] = self.addr
         bmsg[b'nonce'] = urandom(12)
         bmsg[b'name'] = self.name.encode()
+        bmsg[b'cmd'] = cmd
+        log(f'send_kv: cmd: {cmd}')
 
         for k, v in tmsg.items():
+            if isinstance(k, str):
+                k = k.encode(k)
             if k not in bmsg and k not in self.core_msg and k != 'signature':
                 if isinstance(v, str):
                     v = v.encode()
-                bmsg[k.encode()] = v
+                bmsg[k] = v
+
+        to = None
+        hsign = False
+        if b'to' in bmsg:
+            to = bmsg[b'to']
+            hmac_key = self.get_skey(to.decode())
+            if hmac_key is not None:
+                log(f'send_kv: hmac_key: {hmac_key}')
+                hsign = True
+            else:
+                log(f'send_kv: no "skey": {to.decode()}')
+        else:
+            log(f'send_kv: no "to"')
+
+        psign = cmd in self.pkv_cmds
+
+        have_sign = hsign or psign
+        one_sign = hsign ^ psign
+
+        if not have_sign:
+            log(f'send_kv: no sign method')
+            return None
+        if not one_sign:
+            log(f'send_kv: two sign methods')
 
         parts = []
         parts.append(b'type:kv')
@@ -207,18 +199,27 @@ class KernelLoader(object):
 
         s = b' '.join(parts)
         log(f'send_kv: {self.name}: to[{dst}]: {s}')
-        signature = openssl_sign(self.name, s)
-        s += b' signature:' + binascii.b2a_base64(signature, newline=False)
+        signature_slug = b''
+        if psign:
+            signature_slug = b' signature:'
+            signature = pki.sign(self.name, s)
+        elif hsign:
+            signature = pki.calc_hmac(hmac_key, s)
+            signature_slug = b' hmac:'
+        else:
+            return None
+            
+        s += signature_slug + binascii.b2a_base64(signature, newline=False)
 
         log(f'send_kv: {self.name}: to[{dst}]: {s}')
 
         return self.send(self.bcast, s)
 
-    def cast_kv(self, tmsg):
+    def cast_kv(self, cmd, tmsg):
 
-        log(f'cast_kv: msg: {tmsg}')
+        log(f'cast_kv: msg: {cmd}: {tmsg}')
 
-        return self.send_kv(self.bcast, tmsg)
+        return self.send_kv(self.bcast, cmd, tmsg)
 
     def on_cmd_null(self, from_name, src, cmd, msg):
 
@@ -242,13 +243,23 @@ class KernelLoader(object):
         verified = False
         name = kvs.get(b'name')
         log(f'recv_kv: name: {name}')
-        if name is not None and signature.startswith(b'signature:'):
+        if name is not None:
             name = decode_base64(name)
-            signature = signature.split(b':')[-1]
-            signature = decode_base64(signature)
-            log(f'recv_kv: signature: {signature}')
-            verified = openssl_verify(name.decode(), signature, data)
-            log(f'recv_kv: verified: {verified}')
+            if signature.startswith(b'signature:'):
+                signature = signature.split(b':')[-1]
+                signature = decode_base64(signature)
+                log(f'recv_kv: signature: {signature}')
+                verified = pki.verify(name.decode(), signature, data)
+                log(f'recv_kv: verified: {verified}')
+            elif signature.startswith(b'hmac:'):
+                skey = self.get_skey(name)
+                verified = False
+                if skey is not None:
+                    signature = signature.split(b':')[-1]
+                    signature = decode_base64(signature)
+                    log(f'recv_kv: hmac: {signature}')
+                    verified = pki.verify_hmac(skey, data, signature)
+                log(f'recv_kv: hmac verified: {verified}')
         else:
             log(f'recv_kv: sig: {signature}')
             signature = None
@@ -333,43 +344,193 @@ class KernelLoader(object):
 
             self.run_one()
 
+    def setup_tkey(self, to_name):
+
+        _cmd = 'setup_tkey'
+        temporal_pkey = pki.make_temporal_me_to_them(self.name, to_name)
+        if temporal_pkey is None:
+            log(f'client[{self.name}]: {_cmd}: no temporal pkey') 
+            return None
+        else:
+            log(f'client[{self.name}]: {_cmd}: temporal pkey: {temporal_pkey}') 
+            self.tkeys_to[to_name] = temporal_pkey
+
+        return temporal_pkey
+
+    def get_tkey(self, to_name):
+
+        _cmd = 'get_tkey'
+        temporal_pkey = self.tkeys_to.get(to_name)
+        if temporal_pkey is None:
+            log(f'client[{self.name}]: {_cmd}: no temporal pkey') 
+        else:
+            log(f'client[{self.name}]: {_cmd}: temporal pkey: {temporal_pkey}') 
+
+        return temporal_pkey
+
+    def get_skey(self, to_name):
+
+        _cmd = 'get_skey'
+        if isinstance(to_name, bytes):
+            to_name = to_name.decode()
+
+        skey = self.skeys.get(to_name)
+        if skey is None:
+            log(f'client[{self.name}]: {_cmd}: no skey') 
+        else:
+            log(f'client[{self.name}]: {_cmd}: skey: {skey}') 
+
+        return skey
+
+    def save_from_tkey(self, from_name, temporal_pkey_from):
+
+        tkey_fname = f'{from_name}_{self.name}_public.pem'
+        with open(tkey_fname, 'wb') as outf:
+            if isinstance(temporal_pkey_from, str):
+                temporal_pkey_from = temporal_pkey_from.encode()
+
+            outf.write(temporal_pkey_from)
+            outf.flush()
+            self.tkeys_from[from_name] = temporal_pkey_from
+            skey = pki.derive_temporal_key(from_name, self.name)
+            if skey is None:
+                log(f'save_from_tkey: no skey')
+                self.tkeys_from.pop(from_name)
+            else:
+                log(f'save_from_tkey: skey: {skey}')
+                self.skeys[from_name] = skey
+
+    def remove_keys(self, from_name):
+
+        log(f'remove_keys...')
+        try:
+            self.skeys.pop(from_name)
+        except KeyError:
+            pass
+
+        try:
+            self.tkeys_to.pop(from_name)
+        except KeyError:
+            pass
+
+        try:
+            self.tkeys_from.pop(from_name)
+        except KeyError:
+            pass
 
 class ClientKL(KernelLoader):
 
-    def wait(self):
-
-        self.idle()
-
     def on_cmd_hello(self, from_name, src, cmd, msg):
 
+        _cmd = 'on_cmd_hello'
         log(f'client[{self.name}]: cmd_hello: from[{from_name}--{src}]: {msg}')
+        self.remove_keys(from_name)
+        temporal_pkey = self.setup_tkey(from_name)
+        if temporal_pkey is None:
+            log(f'client[{self.name}]: from[{from_name}]: {_cmd}: no temporal pkey') 
+            return None
+        else:
+            log(f'client[{self.name}]: from[{from_name}]: {_cmd}: temporal pkey: {temporal_pkey}') 
 
-        return self.send_hello_ack(src)
+        return self.send_hello_ack(src, from_name, temporal_pkey)
 
-    def send_hello_ack(self, dst):
+    def on_cmd_hello_done(self, from_name, src, cmd, msg):
 
+        _cmd = 'on_cmd_hello_done'
+        log(f'client[{self.name}]: {_cmd}: from[{from_name}]: {msg}')
+
+        temporal_pkey_from = msg.get(b'tkey')
+        if temporal_pkey_from is None:
+            log(f'client[{self.name}]: from[{from_name}]: {_cmd}: no temporal pkey in msg') 
+            return None
+        else:
+            log(f'client[{self.name}]: from[{from_name}]: {_cmd}: temporal pkey: {temporal_pkey_from}') 
+            self.save_from_tkey(from_name, temporal_pkey_from)
+
+        self.send_ping(src, from_name)
+
+        return None
+
+    def send_ping(self, dst, to_name):
+
+        _cmd = 'send_ping'
         msg = {
-            'cmd': 'hello_ack',
+            b'to': to_name,
+            b'time': f'{time.time()}'.encode(),
         }
 
-        return self.send_kv(dst, msg)
+        log(f'client[{self.name}]: to[{to_name}]: {_cmd}: msg: {msg}') 
+
+        return self.send_kv(dst, b'ping', msg)
+
+    def send_hello_ack(self, dst, to_name, tkey):
+
+        _cmd = 'send_hello_ack'
+        msg = {
+            b'to': to_name,
+            b'tkey': tkey,
+        }
+
+        log(f'client[{self.name}]: to[{to_name}]: {_cmd}: to temporal pkey: {tkey}') 
+        log(f'client[{self.name}]: to[{to_name}]: {_cmd}: msg: {msg}') 
+
+        return self.send_kv(dst, b'hello_ack', msg)
 
 
 class ServerKL(KernelLoader):
 
+    def on_cmd_ping(self, from_name, src, cmd, msg):
+
+        _cmd = 'on_cmd_ping'
+        log(f'server[{self.name}]: {_cmd}: from[{from_name}--{src}]: {msg}')
+
     def send_hello(self):
 
+        msg = dict()
+
+        self.cast_kv(b'hello', msg)
+
+        return None
+
+    def send_hello_done(self, dst, to_name):
+
+        _cmd = 'send_hello_done'
+        tkey = self.get_tkey(to_name)
+
+        if tkey is None:
+            return None
+
         msg = {
-            'cmd': b'hello',
+            b'to': to_name,
+            b'tkey': tkey,
         }
 
-        self.cast_kv(msg)
+        self.send_kv(dst, b'hello_done', msg)
 
         return None
 
     def on_cmd_hello_ack(self, from_name, src, cmd, msg):
 
-        log(f'server[{self.name}]: cmd_hello_ack: from[{from_name}--{src}]: {msg}')
+        _cmd = 'on_cmd_hello_ack'
+        log(f'server[{self.name}]: {_cmd}: from[{from_name}--{src}]: {msg}')
+        self.remove_keys(from_name)
+
+        temporal_pkey = self.setup_tkey(from_name)
+        if temporal_pkey is None:
+            log(f'client[{self.name}]: from[{from_name}]: {_cmd}: no temporal pkey') 
+            return None
+        else:
+            log(f'client[{self.name}]: from[{from_name}]: {_cmd}: temporal pkey: {temporal_pkey}') 
+
+        temporal_pkey_from = msg.get(b'tkey')
+        if temporal_pkey_from is None:
+            log(f'client[{self.name}]: from[{from_name}]: {_cmd}: no temporal pkey in msg') 
+            return None
+        else:
+            log(f'client[{self.name}]: from[{from_name}]: {_cmd}: temporal pkey: {temporal_pkey_from}') 
+            self.save_from_tkey(from_name, temporal_pkey_from)
+
+        self.send_hello_done(src, from_name)
 
         return None
 
@@ -390,8 +551,7 @@ def client_main(sys_args):
     log(f'client_main({sys_args})')
 
     client = ClientKL(sys_args.name, sys_args.iface)
-
-    client.wait()
+    client.idle()
 
     return 0
 
@@ -405,12 +565,14 @@ class ModesRun(EnumHelper):
 def main(sys_args, *args, **kwargs):
 
     log(f'main({sys_args})')
+    pki.log = log
 
     mode = Modes(sys_args.mode)
     mode_runner = ModesRun.get(mode.value)
 
     if mode_runner:
         try:
+            os.chdir(sys_args.rdir)
             return mode_runner(sys_args)
         except KeyboardInterrupt:
             log('...exiting')
@@ -428,7 +590,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Kernel loader.')
     parser.add_argument('--name', type=str, required=True, help='Name of what.')
-    parser.add_argument('--dir', type=str, default='./', help='Where to operate.')
+    parser.add_argument('--rdir', type=str, default='./', help='Where to operate.')
     parser.add_argument('--mode', choices=Modes.values(), default=Modes.Server.value, help='Mode of the loader.')
     parser.add_argument('--iface', type=str, default='', help='Interface to use.')
 
