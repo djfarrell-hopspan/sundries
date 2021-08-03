@@ -191,7 +191,7 @@ class KernelLoader(object):
 
         log(f'send_kv: {self.name}: to[{dst}]: {s}')
 
-        return self.send(self.bcast, s)
+        return self.send(dst, s)
 
     def cast_kv(self, cmd, tmsg):
 
@@ -205,7 +205,7 @@ class KernelLoader(object):
 
         return None
 
-    def recv_kv(self, src, eload):
+    def recv_kv(self, dst, src, eload):
 
         logd(f'recv_kv: eload: {eload}')
         split = eload.split(b' ')
@@ -282,31 +282,21 @@ class KernelLoader(object):
 
         return None
 
-    def on_ekl_bcast_kv(self, src, eload):
+    def on_ekl_kv(self, dst, src, eload):
 
-        return self.recv_kv(src, eload)
-
-    def on_ekl_bcast(self, src, eload):
-
-        logd(f'server: ekl_bcast: {src}: {eload}')
-
-        if eload.startswith(b'type:kv '):
-
-            return self.on_ekl_bcast_kv(src, eload)
-
-        return None
+        return self.recv_kv(dst, src, eload)
 
     def on_ekl(self, dst, src, eload):
 
-        if dst == self.bcast:
+        if eload.startswith(b'type:kv '):
 
-            return self.on_ekl_bcast(src, eload)
+            return self.on_ekl_kv(dst, src, eload)
 
         return None
 
     def on_epkt(self, dst, src, etype, eload):
 
-        if etype == self.etype:
+        if etype == self.etype and (dst == self.bcast or dst == self.addr):
 
             return self.on_ekl(dst, src, eload)
 
