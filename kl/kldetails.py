@@ -286,13 +286,19 @@ class KernelLoader(object):
 
         return self.recv_kv(dst, src, eload)
 
+    def on_ekl_blob(self, src, eload):
+
+        pass
+
     def on_ekl(self, dst, src, eload):
 
+        ret = None
         if eload.startswith(b'type:kv '):
+            ret = self.on_ekl_kv(dst, src, eload)
+        elif dst == self.addr and eload.startswith(b'type:blob '):
+            ret = self.on_ekl_blob(src, eload)
 
-            return self.on_ekl_kv(dst, src, eload)
-
-        return None
+        return ret
 
     def on_epkt(self, dst, src, etype, eload):
 
