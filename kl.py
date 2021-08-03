@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 
+import eventio
 import pki
 import utils
 
@@ -114,6 +115,26 @@ def decode_base64(data):
 
     return ret
 
+
+def hexstr_to_int(s):
+
+    ret = -1
+    try:
+        ret = int(s, 16)
+    except ValueError as e:
+        loge(f'hexstr_to_int: {e}: {s}')
+    except Exception as e:
+        loge(f'hexstr_to_int: {e}: {s}')
+
+    return ret
+
+
+
+def int_to_hexstr(num):
+
+    return f'{num:04x}'.encode()
+
+
 class KernelLoader(object):
 
     etype = 0xfff1
@@ -125,6 +146,13 @@ class KernelLoader(object):
     ehdr_len = eaddr_len * 2 + etype_len
     pkv_cmds = {b'hello', b'hello_ack', b'hello_done'}
     core_msg = {b'type', b'mac', b'nonce', b'signature', b'name'}
+
+    non_base64 = {b'type', b'length'}
+
+    other_types = {
+        b'type': bytes,
+        b'length': hexstr_to_int,
+    }
 
     def __init__(self, name, iface):
 
@@ -201,6 +229,10 @@ class KernelLoader(object):
             parts.append(k + b':' + base64)
 
         s = b' '.join(parts)
+
+        length_len = len(' lenght:1234')
+        s += b' length:' + int_to_hexstr(len(s) + length_len)
+            
         logd(f'send_kv: {self.name}: to[{dst}]: {s}')
         signature_slug = b''
         if psign:
@@ -211,7 +243,7 @@ class KernelLoader(object):
             signature_slug = b' hmac:'
         else:
             return None
-            
+
         s += signature_slug + binascii.b2a_base64(signature, newline=False)
 
         log(f'send_kv: {self.name}: to[{dst}]: {s}')
@@ -243,10 +275,20 @@ class KernelLoader(object):
             k, v = part.split(b':')
             kvs[k] = v
 
+        length_ok = False
+        length = kvs.get(b'length')
+        if length is not None:
+            length = hexstr_to_int(length)
+            length_ok = length + 1 + len(signature) == len(eload)
+            if not length_ok:
+                loge(f'recv_kv: bad length: {length} versus {len(data)}')
+        else:
+            loge(f'recv_kv: no length')
+
         verified = False
         name = kvs.get(b'name')
         logd(f'recv_kv: name: {name}')
-        if name is not None:
+        if name is not None and length_ok:
             name = decode_base64(name)
             if signature.startswith(b'signature:'):
                 signature = signature.split(b':')[-1]
@@ -271,6 +313,7 @@ class KernelLoader(object):
         cmsg = dict()
         if verified:
             for k, v in kvs.items():
+                if k not in self.non_base64:
                     v = decode_base64(v)
                     if v and k not in self.core_msg:
                         omsg[k] = v
@@ -450,7 +493,7 @@ class ClientKL(KernelLoader):
             log(f'client[{self.name}]: from[{from_name}]: {_cmd}: temporal pkey: {temporal_pkey_from}') 
             self.save_from_tkey(from_name, temporal_pkey_from)
 
-        self.send_ping(src, from_name)
+        self.on_has_server(src, from_name)
 
         return None
 
@@ -478,6 +521,10 @@ class ClientKL(KernelLoader):
         log(f'client[{self.name}]: to[{to_name}]: {_cmd}') 
 
         return self.send_kv(dst, b'hello_ack', msg)
+
+    def on_has_server(self, dst, to_name):
+
+        self.send_ping(src, from_name)
 
 
 class ServerKL(KernelLoader):
@@ -538,13 +585,49 @@ class ServerKL(KernelLoader):
         return None
 
 
+class KLHandler(eventio.Handler):
+
+    def __init__(self, subject):
+
+        self.subject = subject
+        eventio.Handler.__init__(self, self.subject.name, self.subject.so.fileno())
+
+    def on_readable(self, fd):
+
+        self.subject.run_one()
+
+
+class ServerKLHandler(KLHandler):
+
+    def on_run(self):
+
+        self.subject.send_hello()
+
+
+class ClientKLHandler(KLHandler):
+
+    def on_has_server(self, dst, to_name):
+
+        self.subject.send_ping(dst, to_name)
+
+        self.poller.add_timeout(self.on_ping_timeout, 1., args=(dst, to_name))
+
+    def on_ping_timeout(self, when, dst, to_name):
+
+        self.subject.send_ping(dst, to_name)
+
+        self.poller.add_timeout(self.on_ping_timeout, 1., args=(dst, to_name))
+
+
 def server_main(sys_args):
 
     log(f'server_main({sys_args})')
 
     server = ServerKL(sys_args.name, sys_args.iface)
-    server.send_hello()
-    server.idle()
+    server_handler = ServerKLHandler(server)
+    poller = eventio.Poller()
+    poller.add_handler(server_handler)
+    poller.run()
 
     return 0
 
@@ -554,7 +637,11 @@ def client_main(sys_args):
     log(f'client_main({sys_args})')
 
     client = ClientKL(sys_args.name, sys_args.iface)
-    client.idle()
+    client_handler = ClientKLHandler(client)
+    client.on_has_server = client_handler.on_has_server
+    poller = eventio.Poller()
+    poller.add_handler(client_handler)
+    poller.run()
 
     return 0
 
@@ -567,15 +654,18 @@ class ModesRun(EnumHelper):
 
 def main(sys_args, *args, **kwargs):
 
+    def set_logfns(module):
+
+        module.log = log
+        module.logw = logw
+        module.loge = loge
+        module.logd = logd
+
     log(f'main({sys_args})')
-    pki.log = log
-    pki.logw = logw
-    pki.loge = loge
-    pki.logd = logd
-    utils.log = log
-    utils.logw = logw
-    utils.loge = loge
-    utils.logd = logd
+
+    set_logfns(pki)
+    set_logfns(utils)
+    set_logfns(eventio.poller)
 
     mode = Modes(sys_args.mode)
     mode_runner = ModesRun.get(mode.value)
