@@ -34,7 +34,7 @@ def set_logfns(i, w, e, d):
     log = i
     logw = w
     loge = e
-    logd = e
+    logd = d
 
 
 def urandom(num_bytes):
