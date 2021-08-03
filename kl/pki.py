@@ -7,7 +7,7 @@ import shlex
 import subprocess
 import tempfile
 
-import utils
+from . import utils
 
 
 log =  functools.partial(print, 'info   :')

@@ -11,93 +11,36 @@ import sys
 import tempfile
 import time
 
+from . import enumhelper
 import eventio
-import pki
-import utils
+from . import ip
+from . import pki
+from . import utils
+
+
+log =  functools.partial(print, 'info   :')
+logw = functools.partial(print, 'warning:')
+loge = functools.partial(print, 'error  :')
+logd = functools.partial(print, 'debug  :')
+
+
+def set_logfns(i, w, e, d): 
+
+    global log
+    global logw
+    global loge
+    global logd
+
+    log = i
+    logw = w
+    loge = e
+    logd = e
 
 
 def urandom(num_bytes):
 
     return open('/dev/urandom', 'rb').read(num_bytes)
-
-
-def ip(*args):
-
-    ret = True
-    cmd = ['ip'] + list(args)
-    log(f'running: [{" ".join(cmd)}]')
-    try:
-        subprocess.check_call(cmd)
-    except subprocess.CalledProcessError as cpe:
-        loge(f'error running: [{" ".join(cmd)}]: {cpe}')
-        ret = False
-
-    return ret
-
-
-def ip_link(*args):
-
-    return ip('link', *args)
-
-
-def ip_link_set(*args):
-
-    return ip_link('set', *args)
-
-
-def ip_link_set_promisc(iface):
-
-    return ip_link_set(iface, 'promisc', 'on')
-
-
-def iface_get_mac(iface):
-
-    path = os.path.join('/sys', 'class', 'net', iface, 'address')
-    address = None
-    try:
-        address = open(path).read().strip().replace(':', '')
-    except IOError as e:
-        loge(f'error reading: {path}: {e}')
-    except OSError as e:
-        loge(f'error reading: {path}: {e}')
-    except Exception as e:
-        loge(f'error reading: {path}: {e}')
-
-    try:
-        address = binascii.a2b_hex(address)[:6]
-    except binascii.Error as e:
-        loge(f'error converting: {address}: {e}')
-        address = None
-    except Exception as e:
-        loge(f'error converting: {address}: {e}')
-        address = None
-
-    return address
-
-
-ETH_P_ALL = 3
-def iface_make_ltwo_socket(iface):
-
-    so = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL))
-    so.bind((iface, 0))
-
-    return so
-
-
-class EnumHelper(Enum):
-
-    @classmethod
-    def values(cls):
-
-        return set(v.value for v in cls.__members__.values())
-
-    @classmethod
-    def get(cls, name):
-
-        return getattr(cls, name, None)
-
-
-class Modes(EnumHelper):
+class Modes(enumhelper.EnumHelper):
 
     Server = 'server'
     Client = 'client'
@@ -164,13 +107,13 @@ class KernelLoader(object):
 
         self.name = name
         self.iface = iface
-        self.addr = iface_get_mac(iface)
+        self.addr = ip.iface_get_mac(iface)
         if self.addr is None:
             raise RuntimeError(f'iface[{iface}]: as no address')
-        if not ip_link_set_promisc(iface):
+        if not ip.ip_link_set_promisc(iface):
             raise RuntimeError(f'iface[{iface}]: could not be made promiscuous')
         log(f'address: {binascii.b2a_hex(self.addr)}')
-        self.so = iface_make_ltwo_socket(iface)
+        self.so = ip.iface_make_ltwo_socket(iface)
 
     def send(self, dst, data):
 
@@ -509,6 +452,22 @@ class ClientKL(KernelLoader):
 
         return self.send_kv(dst, b'ping', msg)
 
+    def on_cmd_pong(self, from_name, src, cmd, msg):
+
+        _cmd = 'on_cmd_pong'
+        log(f'server[{self.name}]: {_cmd}: from[{from_name}--{src}]')
+
+        self.on_pong(from_name, src)
+
+        return None
+
+    def on_pong(self, from_name, src):
+
+        _cmd = 'on_pong'
+        log(f'server[{self.name}]: {_cmd}: from[{from_name}--{src}]')
+
+        return None
+
     def send_hello_ack(self, dst, to_name, tkey):
 
         _cmd = 'send_hello_ack'
@@ -524,7 +483,7 @@ class ClientKL(KernelLoader):
 
     def on_has_server(self, dst, to_name):
 
-        self.send_ping(src, from_name)
+        self.send_ping(dst, to_name)
 
 
 class ServerKL(KernelLoader):
@@ -533,6 +492,20 @@ class ServerKL(KernelLoader):
 
         _cmd = 'on_cmd_ping'
         log(f'server[{self.name}]: {_cmd}: from[{from_name}--{src}]')
+
+        self.send_pong(src, from_name)
+
+    def send_pong(self, dst, to_name):
+
+        _cmd = 'send_pong'
+        msg = {
+            b'to': to_name,
+            b'time': f'{time.time()}'.encode(),
+        }
+
+        logd(f'client[{self.name}]: to[{to_name}]: {_cmd})')
+
+        return self.send_kv(dst, b'pong', msg)
 
     def send_hello(self):
 
@@ -583,138 +556,3 @@ class ServerKL(KernelLoader):
         self.send_hello_done(src, from_name)
 
         return None
-
-
-class KLHandler(eventio.Handler):
-
-    def __init__(self, subject):
-
-        self.subject = subject
-        eventio.Handler.__init__(self, self.subject.name, self.subject.so.fileno())
-
-    def on_readable(self, fd):
-
-        self.subject.run_one()
-
-
-class ServerKLHandler(KLHandler):
-
-    def on_run(self):
-
-        self.subject.send_hello()
-
-
-class ClientKLHandler(KLHandler):
-
-    def on_has_server(self, dst, to_name):
-
-        self.subject.send_ping(dst, to_name)
-
-        self.poller.add_timeout(self.on_ping_timeout, 1., args=(dst, to_name))
-
-    def on_ping_timeout(self, when, dst, to_name):
-
-        self.subject.send_ping(dst, to_name)
-
-        self.poller.add_timeout(self.on_ping_timeout, 1., args=(dst, to_name))
-
-
-def server_main(sys_args):
-
-    log(f'server_main({sys_args})')
-
-    server = ServerKL(sys_args.name, sys_args.iface)
-    server_handler = ServerKLHandler(server)
-    poller = eventio.Poller()
-    poller.add_handler(server_handler)
-    poller.run()
-
-    return 0
-
-
-def client_main(sys_args):
-
-    log(f'client_main({sys_args})')
-
-    client = ClientKL(sys_args.name, sys_args.iface)
-    client_handler = ClientKLHandler(client)
-    client.on_has_server = client_handler.on_has_server
-    poller = eventio.Poller()
-    poller.add_handler(client_handler)
-    poller.run()
-
-    return 0
-
-
-class ModesRun(EnumHelper):
-
-    server = server_main
-    client = client_main
-
-
-def main(sys_args, *args, **kwargs):
-
-    def set_logfns(module):
-
-        module.log = log
-        module.logw = logw
-        module.loge = loge
-        module.logd = logd
-
-    log(f'main({sys_args})')
-
-    set_logfns(pki)
-    set_logfns(utils)
-    set_logfns(eventio.poller)
-
-    mode = Modes(sys_args.mode)
-    mode_runner = ModesRun.get(mode.value)
-
-    if mode_runner:
-        try:
-            os.chdir(sys_args.rdir)
-            return mode_runner(sys_args)
-        except KeyboardInterrupt:
-            log('...exiting')
-
-    return 1
-
-
-log =  functools.partial(print, 'info   :')
-logw = functools.partial(print, 'warning:')
-loge = functools.partial(print, 'error  :')
-logd = functools.partial(print, 'debug  :')
-
-
-if __name__ == '__main__':
-
-    import argparse
-    import logging
-
-    parser = argparse.ArgumentParser(description='Kernel loader.')
-    parser.add_argument('--name', type=str, required=True, help='Name of what.')
-    parser.add_argument('--rdir', type=str, default='./', help='Where to operate.')
-    parser.add_argument('--mode', choices=Modes.values(), default=Modes.Server.value, help='Mode of the loader.')
-    parser.add_argument('--iface', type=str, default='', help='Interface to use.')
-    parser.add_argument('--debug', default=False, action='store_true', help='Enable debug printing.')
-
-    args = parser.parse_args(sys.argv[1:])
-
-    log_formatter = logging.Formatter("%(asctime)s [%(threadName)-12.12s] [%(levelname)-5.5s] " + args.name + " %(message)s")
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO if not args.debug else logging.DEBUG)
-
-    file_handler = logging.FileHandler(f'kl-{args.name}-{os.getpid()}.log')
-    file_handler.setFormatter(log_formatter)
-    root_logger.addHandler(file_handler)
-
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(log_formatter)
-    root_logger.addHandler(console_handler)
-
-    log = logging.getLogger().info
-    logw = logging.getLogger().warning
-    loge = logging.getLogger().error
-    logd = logging.getLogger().debug
-
-    sys.exit(main(args))
