@@ -67,9 +67,10 @@ class ServerKLHandler(KLHandler):
 
     def on_ping(self, from_name, src):
 
-        log(f'server handler: adding conn: {(src, from_name)}')
-
         k = (src, from_name)
+        if k not in self.pingers:
+            log(f'server handler: adding conn: {(src, from_name)}')
+
         self.pingers[k] = time.monotonic()
 
 
