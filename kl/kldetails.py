@@ -403,6 +403,11 @@ class KernelLoader(object):
         except KeyError:
             pass
 
+    def has_connection(self, dst, from_name):
+
+        return False
+
+
 class ClientKL(KernelLoader):
 
     def on_cmd_hello(self, from_name, src, cmd, msg):
@@ -489,7 +494,12 @@ class ServerKL(KernelLoader):
         _cmd = 'on_cmd_ping'
         log(f'server[{self.name}]: {_cmd}: from[{from_name}--{src}]')
 
+        self.on_ping(from_name, src)
         self.send_pong(src, from_name)
+
+    def on_ping(self, from_name, src):
+
+        pass
 
     def send_pong(self, dst, to_name):
 
