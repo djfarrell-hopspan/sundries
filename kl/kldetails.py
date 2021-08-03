@@ -80,13 +80,6 @@ def int_to_hexstr(num):
 
 class KernelLoader(object):
 
-    etype = 0xfff1
-    etype_s = struct.Struct('!H')
-    etype_b = etype_s.pack(etype)
-    bcast = b'\xff' * 6
-    etype_len = len(etype_b)
-    eaddr_len = len(bcast)
-    ehdr_len = eaddr_len * 2 + etype_len
     pkv_cmds = {b'hello', b'hello_ack', b'hello_done'}
     core_msg = {b'type', b'mac', b'nonce', b'signature', b'name'}
 
@@ -97,7 +90,7 @@ class KernelLoader(object):
         b'length': hexstr_to_int,
     }
 
-    def __init__(self, name, iface):
+    def __init__(self, name, transport):
 
         # to -> temporal key
         self.tkeys_to = dict()
@@ -106,28 +99,37 @@ class KernelLoader(object):
         self.skeys = dict()
 
         self.name = name
-        self.iface = iface
-        self.addr = ip.iface_get_mac(iface)
-        if self.addr is None:
-            raise RuntimeError(f'iface[{iface}]: as no address')
-        if not ip.ip_link_set_promisc(iface):
-            raise RuntimeError(f'iface[{iface}]: could not be made promiscuous')
-        log(f'address: {binascii.b2a_hex(self.addr)}')
-        self.so = ip.iface_make_ltwo_socket(iface)
+        # name -> transport
+        self.my_transport = transport
+        self.my_transport.set_kl(self)
+        self.transports = {
+            b'__bcast__': self.my_transport,
+        }
 
-    def send(self, dst, data):
+    def send_kv(self, cmd, tmsg):
 
-        pkt = dst + self.addr + self.etype_b + data
+        to_name = tmsg.get('to')
+        if to_name is None:
+            to_name = tmsg.get(b'to')
 
-        return self.so.send(pkt)
+        if isinstance(to_name, str):
+            to_name = to_name.encode()
 
-    def send_kv(self, dst, cmd, tmsg):
+        if to_name is None:
+            loge(f'send_kv: send_kv: no "to"')
+
+        transport = None
+        if to_name in self.transports:
+            transport = self.transports.get(to_name)
+        else:
+            loge(f'send_kv: no transport: {to_name}')
+            return None
 
         if isinstance(cmd, str):
             cmd = cmd.encode()
 
         bmsg = dict()
-        bmsg[b'mac'] = self.addr
+        bmsg[b'addr_info'] = f'{self.my_transport.other_info}'.encode()
         bmsg[b'nonce'] = urandom(12)
         bmsg[b'name'] = self.name.encode()
         bmsg[b'cmd'] = cmd
@@ -168,7 +170,11 @@ class KernelLoader(object):
         parts = []
         parts.append(b'type:kv')
         for k, v in bmsg.items():
-            base64 = binascii.b2a_base64(v, newline=False)
+            try:
+                base64 = binascii.b2a_base64(v, newline=False)
+            except TypeError as e:
+                log(f'send_kv: encoding: {k}, {v}')
+
             parts.append(k + b':' + base64)
 
         s = b' '.join(parts)
@@ -176,7 +182,7 @@ class KernelLoader(object):
         length_len = len(' lenght:1234')
         s += b' length:' + int_to_hexstr(len(s) + length_len)
             
-        logd(f'send_kv: {self.name}: to[{dst}]: {s}')
+        logd(f'send_kv: {self.name}: {s}')
         signature_slug = b''
         if psign:
             signature_slug = b' signature:'
@@ -189,28 +195,22 @@ class KernelLoader(object):
 
         s += signature_slug + binascii.b2a_base64(signature, newline=False)
 
-        log(f'send_kv: {self.name}: to[{dst}]: {s}')
+        log(f'send_kv: {self.name}: {s}')
 
-        return self.send(dst, s)
+        return transport.send(s)
 
-    def cast_kv(self, cmd, tmsg):
+    def on_cmd_null(self, from_name, cmd, msg):
 
-        log(f'cast_kv: msg: {cmd}: {tmsg}')
-
-        return self.send_kv(self.bcast, cmd, tmsg)
-
-    def on_cmd_null(self, from_name, src, cmd, msg):
-
-        log(f'{self.name}: from {src}: null: cmd: {msg}')
+        log(f'{self.name}: {from_name}: null: cmd: {msg}')
 
         return None
 
-    def recv_kv(self, dst, src, eload):
+    def recv_kv(self, data, bcast):
 
-        logd(f'recv_kv: eload: {eload}')
-        split = eload.split(b' ')
+        logd(f'recv_kv: data: {data}')
+        split = data.split(b' ')
         signature = split[-1]
-        data = b' '.join(split[:-1])
+        payload = b' '.join(split[:-1])
 
         kvs = dict()
         logd(f'recv_kv: split: {split}')
@@ -222,9 +222,10 @@ class KernelLoader(object):
         length = kvs.get(b'length')
         if length is not None:
             length = hexstr_to_int(length)
-            length_ok = length + 1 + len(signature) == len(eload)
+            calc_length = length + 1 + len(signature) 
+            length_ok = length + 1 + len(signature) == len(data)
             if not length_ok:
-                loge(f'recv_kv: bad length: {length} versus {len(data)}')
+                loge(f'recv_kv: bad length: {calc_length} versus {len(data)}')
         else:
             loge(f'recv_kv: no length')
 
@@ -237,7 +238,7 @@ class KernelLoader(object):
                 signature = signature.split(b':')[-1]
                 signature = decode_base64(signature)
                 logd(f'recv_kv: signature: {signature}')
-                verified = pki.verify(name.decode(), signature, data)
+                verified = pki.verify(name.decode(), signature, payload)
                 log(f'recv_kv: verified: {verified}')
             elif signature.startswith(b'hmac:'):
                 skey = self.get_skey(name)
@@ -246,7 +247,7 @@ class KernelLoader(object):
                     signature = signature.split(b':')[-1]
                     signature = decode_base64(signature)
                     logd(f'recv_kv: hmac: {signature}')
-                    verified = pki.verify_hmac(skey, data, signature)
+                    verified = pki.verify_hmac(skey, payload, signature)
                 log(f'recv_kv: hmac verified: {verified}')
         else:
             logd(f'recv_kv: sig: {signature}')
@@ -268,9 +269,9 @@ class KernelLoader(object):
             if set(cmsg.keys()) - self.core_msg:
                 logw(f'recv_kv: not all core msg: {set(cmsg.keys())}')
                 omsg = dict()
-            elif cmsg[b'mac'] != src:
-                logw(f'recv_kv: src mismatch: msg[{cmsg[b"mac"]}] vs pkt[{src}]')
-                omsg = dict()
+
+        if bcast:
+            self.transports[name] = self.my_transport
 
         cmd = omsg.get(b'cmd')
         logd(f'recv_kv: cmd: {cmd}')
@@ -278,50 +279,13 @@ class KernelLoader(object):
             cmd = cmd.decode()
             name = name.decode()
             handler = getattr(self, f'on_cmd_{cmd}', self.on_cmd_null)
-            return handler(name, src, cmd, omsg)
+            return handler(name, cmd, omsg)
 
         return None
 
-    def on_ekl_kv(self, dst, src, eload):
+    def on_readable(self, fd):
 
-        return self.recv_kv(dst, src, eload)
-
-    def on_ekl_blob(self, src, eload):
-
-        pass
-
-    def on_ekl(self, dst, src, eload):
-
-        ret = None
-        if eload.startswith(b'type:kv '):
-            ret = self.on_ekl_kv(dst, src, eload)
-        elif dst == self.addr and eload.startswith(b'type:blob '):
-            ret = self.on_ekl_blob(src, eload)
-
-        return ret
-
-    def on_epkt(self, dst, src, etype, eload):
-
-        if etype == self.etype and (dst == self.bcast or dst == self.addr):
-
-            return self.on_ekl(dst, src, eload)
-
-        return None
-
-    def run_one(self):
-
-        pkt = self.so.recv(2**16)
-        logd(f'recv pkt: len={len(pkt)}')
-        if len(pkt) >= self.ehdr_len:
-            dst = pkt[:self.eaddr_len]
-            src = pkt[self.eaddr_len:self.eaddr_len*2]
-            etype = pkt[self.eaddr_len*2:self.eaddr_len*2 + 2]
-            etype, = self.etype_s.unpack(etype)
-            eload = pkt[self.eaddr_len*2 + 2:]
-
-            return self.on_epkt(dst, src, etype, eload)
-
-        return None
+        return self.transport.on_readable(fd)
 
     def idle(self):
 
@@ -403,17 +367,17 @@ class KernelLoader(object):
         except KeyError:
             pass
 
-    def has_connection(self, dst, from_name):
+    def has_connection(self, from_name):
 
         return False
 
 
 class ClientKL(KernelLoader):
 
-    def on_cmd_hello(self, from_name, src, cmd, msg):
+    def on_cmd_hello(self, from_name, cmd, msg):
 
         _cmd = 'on_cmd_hello'
-        log(f'client[{self.name}]: cmd_hello: from[{from_name}--{src}]')
+        log(f'client[{self.name}]: cmd_hello: from[{from_name}]')
         self.remove_keys(from_name)
         temporal_pkey = self.setup_tkey(from_name)
         if temporal_pkey is None:
@@ -422,9 +386,9 @@ class ClientKL(KernelLoader):
         else:
             log(f'client[{self.name}]: from[{from_name}]: {_cmd}: temporal pkey: {temporal_pkey}') 
 
-        return self.send_hello_ack(src, from_name, temporal_pkey)
+        return self.send_hello_ack(from_name, temporal_pkey)
 
-    def on_cmd_hello_done(self, from_name, src, cmd, msg):
+    def on_cmd_hello_done(self, from_name, cmd, msg):
 
         _cmd = 'on_cmd_hello_done'
         log(f'client[{self.name}]: {_cmd}: from[{from_name}]')
@@ -437,11 +401,11 @@ class ClientKL(KernelLoader):
             log(f'client[{self.name}]: from[{from_name}]: {_cmd}: temporal pkey: {temporal_pkey_from}') 
             self.save_from_tkey(from_name, temporal_pkey_from)
 
-        self.on_has_server(src, from_name)
+        self.on_has_server(from_name)
 
         return None
 
-    def send_ping(self, dst, to_name):
+    def send_ping(self, to_name):
 
         _cmd = 'send_ping'
         msg = {
@@ -451,25 +415,25 @@ class ClientKL(KernelLoader):
 
         logd(f'client[{self.name}]: to[{to_name}]: {_cmd})')
 
-        return self.send_kv(dst, b'ping', msg)
+        return self.send_kv(b'ping', msg)
 
-    def on_cmd_pong(self, from_name, src, cmd, msg):
+    def on_cmd_pong(self, from_name, cmd, msg):
 
         _cmd = 'on_cmd_pong'
-        log(f'server[{self.name}]: {_cmd}: from[{from_name}--{src}]')
+        log(f'server[{self.name}]: {_cmd}: from[{from_name}]')
 
-        self.on_pong(from_name, src)
+        self.on_pong(from_name)
 
         return None
 
-    def on_pong(self, from_name, src):
+    def on_pong(self, from_name):
 
         _cmd = 'on_pong'
-        log(f'server[{self.name}]: {_cmd}: from[{from_name}--{src}]')
+        log(f'server[{self.name}]: {_cmd}: from[{from_name}]')
 
         return None
 
-    def send_hello_ack(self, dst, to_name, tkey):
+    def send_hello_ack(self, to_name, tkey):
 
         _cmd = 'send_hello_ack'
         msg = {
@@ -480,28 +444,28 @@ class ClientKL(KernelLoader):
         logd(f'client[{self.name}]: to[{to_name}]: {_cmd}: to temporal pkey: {tkey}') 
         log(f'client[{self.name}]: to[{to_name}]: {_cmd}') 
 
-        return self.send_kv(dst, b'hello_ack', msg)
+        return self.send_kv(b'hello_ack', msg)
 
-    def on_has_server(self, dst, to_name):
+    def on_has_server(self, to_name):
 
-        self.send_ping(dst, to_name)
+        self.send_ping(to_name)
 
 
 class ServerKL(KernelLoader):
 
-    def on_cmd_ping(self, from_name, src, cmd, msg):
+    def on_cmd_ping(self, from_name, cmd, msg):
 
         _cmd = 'on_cmd_ping'
-        log(f'server[{self.name}]: {_cmd}: from[{from_name}--{src}]')
+        log(f'server[{self.name}]: {_cmd}: from[{from_name}]')
 
-        self.on_ping(from_name, src)
-        self.send_pong(src, from_name)
+        self.on_ping(from_name)
+        self.send_pong(from_name)
 
-    def on_ping(self, from_name, src):
+    def on_ping(self, from_name):
 
         pass
 
-    def send_pong(self, dst, to_name):
+    def send_pong(self, to_name):
 
         _cmd = 'send_pong'
         msg = {
@@ -511,17 +475,19 @@ class ServerKL(KernelLoader):
 
         logd(f'client[{self.name}]: to[{to_name}]: {_cmd})')
 
-        return self.send_kv(dst, b'pong', msg)
+        return self.send_kv(b'pong', msg)
 
     def send_hello(self):
 
-        msg = dict()
+        msg = {
+            b'to': b'__bcast__',
+        }
 
-        self.cast_kv(b'hello', msg)
+        self.send_kv(b'hello', msg)
 
         return None
 
-    def send_hello_done(self, dst, to_name):
+    def send_hello_done(self, to_name):
 
         _cmd = 'send_hello_done'
         tkey = self.get_tkey(to_name)
@@ -534,14 +500,14 @@ class ServerKL(KernelLoader):
             b'tkey': tkey,
         }
 
-        self.send_kv(dst, b'hello_done', msg)
+        self.send_kv(b'hello_done', msg)
 
         return None
 
-    def on_cmd_hello_ack(self, from_name, src, cmd, msg):
+    def on_cmd_hello_ack(self, from_name, cmd, msg):
 
         _cmd = 'on_cmd_hello_ack'
-        log(f'server[{self.name}]: {_cmd}: from[{from_name}--{src}]')
+        log(f'server[{self.name}]: {_cmd}: from[{from_name}]')
         self.remove_keys(from_name)
 
         temporal_pkey = self.setup_tkey(from_name)
@@ -559,6 +525,6 @@ class ServerKL(KernelLoader):
             logd(f'client[{self.name}]: from[{from_name}]: {_cmd}: temporal pkey: {temporal_pkey_from}') 
             self.save_from_tkey(from_name, temporal_pkey_from)
 
-        self.send_hello_done(src, from_name)
+        self.send_hello_done(from_name)
 
         return None

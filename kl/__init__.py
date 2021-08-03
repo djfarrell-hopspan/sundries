@@ -6,6 +6,7 @@ import eventio
 from . import kldetails
 from . import klevent
 from . import ip
+from . import transports
 
 
 log =  functools.partial(print, 'info   :')
@@ -23,3 +24,4 @@ def set_logfns(i, w, e, d):
     kldetails.set_logfns(i, w, e, d)
     klevent.set_logfns(i, w, e, d)
     ip.set_logfns(i, w, e, d)
+    transports.set_logfns(i, w, e, d)

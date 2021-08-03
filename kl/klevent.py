@@ -32,11 +32,11 @@ class KLHandler(eventio.Handler):
         self.subject = subject
         self.pingers = {}
 
-        eventio.Handler.__init__(self, self.subject.name, self.subject.so.fileno())
+        eventio.Handler.__init__(self, self.subject.name, self.subject.my_transport.so.fileno())
 
     def on_readable(self, fd):
 
-        self.subject.run_one()
+        self.subject.my_transport.on_readable(fd)
 
     def on_check_pingers(self, when):
 
@@ -49,9 +49,9 @@ class KLHandler(eventio.Handler):
 
         self.poller.add_timeout(self.on_check_pingers, 0.25)
 
-    def has_connection(self, dst, from_name):
+    def has_connection(self, from_name):
 
-        return (dst, from_name) in self.pingers
+        return from_name in self.pingers
 
     def on_run(self):
 
@@ -65,40 +65,49 @@ class ServerKLHandler(KLHandler):
         KLHandler.on_run(self)
         self.subject.send_hello()
 
-    def on_ping(self, from_name, src):
+    def on_ping(self, from_name):
 
-        k = (src, from_name)
+        k = from_name
         if k not in self.pingers:
-            log(f'server handler: adding conn: {(src, from_name)}')
+            log(f'server handler: adding conn: {from_name}')
 
         self.pingers[k] = time.monotonic()
 
 
 class ClientKLHandler(KLHandler):
 
-    def on_pong(self, from_name, src):
+    def on_pong(self, from_name):
 
-        k = (src, from_name)
+        k = from_name
         if k in self.pingers:
             self.pingers[k] = time.monotonic()
 
-        self.poller.add_timeout(self.on_pong_timeout, 1., args=(src, from_name))
+        self.poller.add_timeout(self.on_pong_timeout, 1., args=(from_name,))
 
-    def on_has_server(self, dst, to_name):
+    def on_has_server(self, to_name):
 
-        self.subject.send_ping(dst, to_name)
-        self.pingers[(dst, to_name)] = time.monotonic()
+        self.subject.send_ping(to_name)
+        self.pingers[to_name] = time.monotonic()
 
-    def on_pong_timeout(self, when, dst, to_name):
+    def on_pong_timeout(self, when, to_name):
 
-        self.subject.send_ping(dst, to_name)
+        self.subject.send_ping(to_name)
 
 
-def make_kl_server_handler(name, iface):
+class ClientKLAcceptHandler(KLHandler):
 
-    log(f'make server handler: {name}, {iface}')
+    def __init__(self, *args, **kwargs):
 
-    server = kldetails.ServerKL(name, iface)
+        KLHandler.__init__(self, *args, **kwargs)
+
+        self.subject.my_transport.listen()
+
+
+def make_kl_server_handler(name, transport):
+
+    log(f'make server handler: {name}, {transport}')
+
+    server = kldetails.ServerKL(name, transport)
     server_handler = ServerKLHandler(server)
     server.on_ping = server_handler.on_ping
     server.has_connection = server_handler.has_connection
@@ -106,11 +115,11 @@ def make_kl_server_handler(name, iface):
     return server_handler
 
 
-def make_kl_client_handler(name, iface):
+def make_kl_client_handler(name, transport):
 
-    log(f'make client handler: {name}, {iface}')
+    log(f'make client handler: {name}, {transport}')
 
-    client = kldetails.ClientKL(name, iface)
+    client = kldetails.ClientKL(name, transport)
     client_handler = ClientKLHandler(client)
     client.on_has_server = client_handler.on_has_server
     client.on_pong = client_handler.on_pong

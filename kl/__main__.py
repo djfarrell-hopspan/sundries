@@ -11,12 +11,14 @@ import eventio
 from . import kldetails
 from . import klevent
 from . import set_logfns
+from . import transports
 
 def server_main(sys_args):
 
     log(f'server_main({sys_args})')
 
-    server_handler = klevent.make_kl_server_handler(sys_args.name, sys_args.iface)
+    enet_transport = transports.Ethernet(sys_args.iface, sys_args.name, connect_info=None, bind_info=(sys_args.iface, 0))
+    server_handler = klevent.make_kl_server_handler(sys_args.name, enet_transport)
     poller = eventio.Poller()
     poller.add_handler(server_handler)
     poller.run()
@@ -28,7 +30,8 @@ def client_main(sys_args):
 
     log(f'client_main({sys_args})')
 
-    client_handler = klevent.make_kl_client_handler(sys_args.name, sys_args.iface)
+    enet_transport = transports.Ethernet(sys_args.iface, sys_args.name, connect_info=None, bind_info=(sys_args.iface, 0))
+    client_handler = klevent.make_kl_client_handler(sys_args.name, enet_transport)
     poller = eventio.Poller()
     poller.add_handler(client_handler)
     poller.run()
