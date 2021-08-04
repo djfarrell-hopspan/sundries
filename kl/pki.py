@@ -31,6 +31,9 @@ def set_logfns(i, w, e, d):
 
 def sign(name, data):
 
+    if isinstance(name, bytes):
+        name = name.decode()
+
     signature = None
     if isinstance(data, str):
         data = data.encode()
@@ -50,6 +53,9 @@ def sign(name, data):
 
 
 def verify(name, signature, data):
+
+    if isinstance(name, bytes):
+        name = name.decode()
 
     verified = False
     if isinstance(data, str):
@@ -79,6 +85,11 @@ def verify(name, signature, data):
 
 def make_temporal_me_to_them(me_name, them_name):
 
+    if isinstance(me_name, bytes):
+        me_name = me_name.decode()
+    if isinstance(them_name, bytes):
+        them_name = them_name.decode()
+
     private_name = f'{me_name}_{them_name}_private.pem'
     public_name = f'{me_name}_{them_name}_public.pem'
     ret = None
@@ -102,6 +113,11 @@ def make_temporal_me_to_them(me_name, them_name):
 
 def save_them_to_me_temporal(them_name, me_name, data):
 
+    if isinstance(me_name, bytes):
+        me_name = me_name.decode()
+    if isinstance(them_name, bytes):
+        them_name = them_name.decode()
+
     fname = f'{them_name}_{me_name}_public.pem'
     with open(fname, 'wb') as outf:
         if isinstance(data, str):
@@ -112,6 +128,11 @@ def save_them_to_me_temporal(them_name, me_name, data):
 
 
 def derive_temporal_key(them_name, me_name):
+
+    if isinstance(me_name, bytes):
+        me_name = me_name.decode()
+    if isinstance(them_name, bytes):
+        them_name = them_name.decode()
 
     me_to_them_fname = f'{me_name}_{them_name}_private.pem'
     them_to_me_fname = f'{them_name}_{me_name}_public.pem'

@@ -21,9 +21,10 @@ def server_main(sys_args):
         loge(f'Need "--to" in server mode')
         raise SystemExit(1)
 
+    name = sys_args.name.encode()
     transport_class = transports.RTransports.get(sys_args.transport).value
-    transport = transport_class(sys_args.name, addr_info=sys_args.addrinfo, out_going=True, to=sys_args.to.encode())
-    server_handler = klevent.make_kl_server_handler(sys_args.name, transport,)
+    transport = transport_class(name, addr_info=sys_args.addrinfo, out_going=True, to=sys_args.to.encode())
+    server_handler = klevent.make_kl_server_handler(name, transport,)
     poller = eventio.Poller()
     poller.add_handler(server_handler)
     poller.run()
@@ -35,9 +36,10 @@ def client_main(sys_args):
 
     log(f'client_main({sys_args})')
 
+    name = sys_args.name.encode()
     transport_class = transports.RTransports.get(sys_args.transport).value
-    transport = transport_class(sys_args.name, addr_info=sys_args.addrinfo, out_going=False)
-    client_handler = klevent.make_kl_client_handler(sys_args.name, transport)
+    transport = transport_class(name, addr_info=sys_args.addrinfo, out_going=False)
+    client_handler = klevent.make_kl_client_handler(name, transport)
     poller = eventio.Poller()
     poller.add_handler(client_handler)
     poller.run()

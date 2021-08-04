@@ -24,6 +24,9 @@ def set_logfns(i, w, e, d):
 
 def safe_remove(fname):
 
+    if isinstance(fname, bytes):
+        fname = fname.decode()
+
     try:
         os.remove(fname)
     except IOError as e:

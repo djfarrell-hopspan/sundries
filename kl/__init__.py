@@ -3,7 +3,9 @@ import functools
 
 from . import clientevents
 from . import enumhelper
+from . import events
 import eventio
+from . import events
 from . import kldetails
 from . import klevent
 from . import ip
@@ -26,6 +28,7 @@ def set_logfns(i, w, e, d):
     kldetails.set_logfns(i, w, e, d)
     klevent.set_logfns(i, w, e, d)
     ip.set_logfns(i, w, e, d)
+    events.set_logfns(i, w, e, d)
     serverevents.set_logfns(i, w, e, d)
     clientevents.set_logfns(i, w, e, d)
     transports.set_logfns(i, w, e, d)

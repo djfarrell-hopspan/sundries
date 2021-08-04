@@ -106,8 +106,7 @@ class KernelLoader(object):
             b'__bcast__': self.my_transport,
         }
 
-        self.handlers = {
-        }
+        self.handlers = {}
 
         self.pingers = {}
 
@@ -182,7 +181,7 @@ class KernelLoader(object):
         bmsg = dict()
         bmsg[b'addr_info'] = f'{self.my_transport.other_info}'.encode()
         bmsg[b'nonce'] = urandom(12)
-        bmsg[b'name'] = self.name.encode()
+        bmsg[b'name'] = self.name
         bmsg[b'cmd'] = cmd
         log(f'send_kv: cmd: {cmd}')
 
@@ -198,7 +197,7 @@ class KernelLoader(object):
         hsign = False
         if b'to' in bmsg:
             to = bmsg[b'to']
-            hmac_key = self.get_skey(to.decode())
+            hmac_key = self.get_skey(to)
             if hmac_key is not None:
                 logd(f'send_kv: hmac_key: {hmac_key}')
                 hsign = True
@@ -329,6 +328,10 @@ class KernelLoader(object):
         cmd = omsg.get(b'cmd')
         logd(f'recv_kv: cmd: {cmd}: handler: {handler_obj}')
         if isinstance(cmd, bytes):
+            ret = handler_obj.handle_event(cmd, name, omsg)
+            if ret:
+                return ret
+
             cmd = cmd.decode()
             name = name.decode()
             handler = getattr(handler_obj, f'on_cmd_{cmd}', self.on_cmd_null)
@@ -347,6 +350,8 @@ class KernelLoader(object):
             self.run_one()
 
     def setup_tkey(self, to_name):
+
+        logd(f'setup_tkey: setting up tkey: {to_name}')
 
         _cmd = 'setup_tkey'
         temporal_pkey = pki.make_temporal_me_to_them(self.name, to_name)
@@ -373,12 +378,10 @@ class KernelLoader(object):
     def get_skey(self, to_name):
 
         _cmd = 'get_skey'
-        if isinstance(to_name, bytes):
-            to_name = to_name.decode()
 
         skey = self.skeys.get(to_name)
         if skey is None:
-            logw(f'client[{self.name}]: {_cmd}: no skey') 
+            logw(f'client[{self.name}]: {_cmd}: no skey: {to_name}: {tuple(self.skeys.keys())}') 
         else:
             logd(f'client[{self.name}]: {_cmd}: skey: {skey}') 
 
@@ -386,7 +389,8 @@ class KernelLoader(object):
 
     def save_from_tkey(self, from_name, temporal_pkey_from):
 
-        tkey_fname = f'{from_name}_{self.name}_public.pem'
+        ret = False
+        tkey_fname = f'{from_name.decode()}_{self.name.decode()}_public.pem'
         with open(tkey_fname, 'wb') as outf:
             if isinstance(temporal_pkey_from, str):
                 temporal_pkey_from = temporal_pkey_from.encode()
@@ -401,6 +405,9 @@ class KernelLoader(object):
             else:
                 logd(f'save_from_tkey: skey: {skey}')
                 self.skeys[from_name] = skey
+                ret = True
+
+        return True
 
     def remove_keys(self, from_name):
 
@@ -429,7 +436,7 @@ class KernelLoaderEvents(object):
 
     def __getattr__(self, name):
 
-        if hasattr(self.subject, name):
+        if name != 'subject' and hasattr(self.subject, name):
             return getattr(self.subject, name)
 
-        raise AttributeError(f'KernelLoader: {name}')
+        raise AttributeError(f'{self.__class__}: {name}')
