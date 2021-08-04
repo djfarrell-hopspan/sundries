@@ -50,6 +50,16 @@ class ServerRunningEvents(kldetails.KernelLoaderEvents):
 
         return self.send_kv(b'pong', msg)
 
+    def on_cmd_register_blob(self, from_name, cmd, msg):
+
+        _cmd = 'on_cmd_register_blob'
+        log(f'server[{self.name}]: {_cmd}: from[{from_name}]')
+
+        blob_name = msg.get(b'blob_name')
+        blob_size = msg.get(b'blob_size')
+
+        logw(f'new blob: name: {blob_name}, size: {blob_size}')
+
 
 class ServerStartupEvents(kldetails.KernelLoaderEvents):
 

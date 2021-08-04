@@ -75,6 +75,7 @@ class ServerKLHandler(KLHandler, serverevents.ServerStartupEvents, serverevents.
 
         self.pingers[k] = time.monotonic()
 
+
 class ClientEvents(clientevents.ClientStartupEvents, clientevents.ClientRunningEvents):
 
     def on_pong(self, from_name):
@@ -88,6 +89,7 @@ class ClientEvents(clientevents.ClientStartupEvents, clientevents.ClientRunningE
     def on_has_server(self, to_name):
 
         self.send_ping(to_name)
+        self.register_blobs(to_name)
         self.pingers[to_name] = time.monotonic()
 
     def on_pong_timeout(self, when, to_name):
@@ -97,19 +99,39 @@ class ClientEvents(clientevents.ClientStartupEvents, clientevents.ClientRunningE
         else:
             logw(f'Client: can no longer ping: {to_name}')
 
+    def register_blobs(self, to_name):
+
+        pass
+
 
 class ClientKLHandler(KLHandler, ClientEvents):
+
+    blobs = {
+        'kernel': 123456,
+        'initramfs': 78901,
+    }
 
     pass
 
 
 class ClientTransportHandler(eventio.Handler, ClientEvents):
 
+    blobs = {
+        'kernel': 123456,
+        'initramfs': 78901,
+    }
+
     def __init__(self, subject, transport, *args, **kwargs):
 
         self.subject = subject
         self.transport = transport
         eventio.Handler.__init__(self, *args, **kwargs)
+
+    def register_blobs(self, to_name):
+
+        for blob_name, blob_size in self.blobs.items():
+
+            self.send_register_blob(to_name, blob_name, blob_size)
 
     def on_readable(self, fd):
 

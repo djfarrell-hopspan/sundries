@@ -108,4 +108,15 @@ class ClientRunningEvents(kldetails.KernelLoaderEvents):
 
         self.send_ping(to_name)
 
+    def send_register_blob(self, to_name, blob_name, blob_size):
 
+        _cmd = 'send_register_blob'
+        msg = {
+            b'to': to_name,
+            b'blob_name': blob_name,
+            b'blob_size': f'{blob_size}',
+        }
+
+        logd(f'client[{self.name}]: to[{to_name}]: {_cmd})')
+
+        return self.send_kv(b'register_blob', msg)
