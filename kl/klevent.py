@@ -58,12 +58,12 @@ class KLHandler(eventio.Handler):
         self.poller.add_timeout(self.on_check_pingers, 0.25)
 
 
-class ServerKLHandler(KLHandler):
+class ServerKLHandler(KLHandler, kldetails.ServerStartupEvents, kldetails.ServerRunningEvents):
 
     def on_run(self):
 
         KLHandler.on_run(self)
-        self.subject.send_hello()
+        self.send_hello()
 
     def on_ping(self, from_name):
 
@@ -73,8 +73,7 @@ class ServerKLHandler(KLHandler):
 
         self.pingers[k] = time.monotonic()
 
-
-class ClientKLHandler(KLHandler):
+class ClientEvents(kldetails.ClientStartupEvents, kldetails.ClientRunningEvents):
 
     def on_pong(self, from_name):
 
@@ -86,12 +85,33 @@ class ClientKLHandler(KLHandler):
 
     def on_has_server(self, to_name):
 
-        self.subject.send_ping(to_name)
+        self.send_ping(to_name)
         self.pingers[to_name] = time.monotonic()
 
     def on_pong_timeout(self, when, to_name):
 
-        self.subject.send_ping(to_name)
+        if to_name in self.pingers:
+            self.send_ping(to_name)
+        else:
+            logw(f'Client: can no longer ping: {to_name}')
+
+
+class ClientKLHandler(KLHandler, ClientEvents):
+
+    pass
+
+
+class ClientTransportHandler(eventio.Handler, ClientEvents):
+
+    def __init__(self, subject, transport, *args, **kwargs):
+
+        self.subject = subject
+        self.transport = transport
+        eventio.Handler.__init__(self, *args, **kwargs)
+
+    def on_readable(self, fd):
+
+        return self.transport.on_readable(fd)
 
 
 class ClientKLAcceptHandler(KLHandler):
@@ -100,15 +120,51 @@ class ClientKLAcceptHandler(KLHandler):
 
         KLHandler.__init__(self, *args, **kwargs)
 
+        # fd -> ClientKLHandler
+        self.connections = {}
+        self.transport_class = self.subject.my_transport.__class__
+        self.subject.my_transport.on_accept = self.on_accept
+        self.on_readable = self.subject.my_transport.accept
+
+        self.subject.my_transport.bind()
         self.subject.my_transport.listen()
+
+    def on_accept(self, so, addr_info):
+
+        log(f'accept handler: {addr_info}')
+        transport = self.transport_class.from_accept(self.subject.name, self.subject, so, addr_info, self.subject.my_transport.to)
+        transport.on_disconnect = self.on_disconnect
+        handler = ClientTransportHandler(self.subject, transport, f'{addr_info}', fds=(transport.so.fileno(),))
+        self.subject.add_handler(transport=transport, handler=handler)
+        self.poller.add_handler(handler)
+
+        self.connections[so.fileno()] = (transport, handler)
+
+    def on_disconnect(self, transport):
+
+        transport, handler = self.connections.get(transport.so.fileno())
+        self.poller.pop_handler(handler)
+
+        try:
+            self.connections.pop(transport.so.fileno())
+        except KeyError:
+            pass
+
+        if handler is not None:
+            self.subject.on_close(transport=transport, handler=handler)
+
+    def on_readable(self, fd):
+
+        self.subject.my_transport.on_readable(fd)
 
 
 def make_kl_server_handler(name, transport):
 
     log(f'make server handler: {name}, {transport}')
 
-    server = kldetails.ServerKL(name, transport)
+    server = kldetails.KernelLoader(name, transport)
     server_handler = ServerKLHandler(server)
+    server_handler.add_handler(handler=server_handler)
     server.on_ping = server_handler.on_ping
     server.has_connection = server_handler.has_connection
 
@@ -119,10 +175,15 @@ def make_kl_client_handler(name, transport):
 
     log(f'make client handler: {name}, {transport}')
 
-    client = kldetails.ClientKL(name, transport)
-    client_handler = ClientKLHandler(client)
-    client.on_has_server = client_handler.on_has_server
-    client.on_pong = client_handler.on_pong
-    client.has_connection = client_handler.has_connection
+    client = kldetails.KernelLoader(name, transport)
+
+    if transport.connector and not transport.out_going:
+        client_handler = ClientKLAcceptHandler(client)
+    else:
+        client_handler = ClientKLHandler(client)
+        client_handler.add_handler(handler=client_handler)
+        client.on_has_server = client_handler.on_has_server
+        client.on_pong = client_handler.on_pong
+        client.has_connection = client_handler.has_connection
 
     return client_handler

@@ -4,6 +4,7 @@ import socket
 import binascii
 import struct
 
+from . import enumhelper
 from . import ip
 
 
@@ -31,19 +32,44 @@ class Transport(object):
     family = None
     type_ = None
     proto = None
+    connector = True
 
-    def __init__(self, name, connect_info=None, bind_info=None):
+    def __init__(self, name, kl=None, so=None, addr_info=None, out_going=False, to=None):
 
         self.name = name
-        self.bind_info = bind_info
-        self.connect_info = connect_info
+        self.addr_info = self.parse_addr_info(addr_info)
         self.other_info = None
         self.src = None
         self.dst = None
-        self.so = None
-        self.kl = None
+        self.so = so
+        self.kl = kl
+        self.out_going = out_going
+        self.to = to
+        self.connected = False
 
-        self.make_so()
+        if not so:
+            self.make_so()
+        if self.out_going:
+            self.connect()
+        self.so.setblocking(False)
+
+    @classmethod
+    def from_accept(cls, name, kl, so, addr_info, to):
+
+        return cls(name, kl=kl, so=so, addr_info=addr_info, to=to)
+
+    @classmethod
+    def parse_addr_info(cls, addr_info):
+
+        if isinstance(addr_info, tuple):
+            return addr_info
+        elif addr_info is None:
+            return None
+
+        first, second = addr_info.split(':')
+        second = int(second)
+
+        return (first, second)
 
     def set_kl(self, kl):
 
@@ -53,28 +79,33 @@ class Transport(object):
 
         if None not in {self.family, self.type_}:
             self.so = socket.socket(self.family, self.type_, self.proto if self.proto else -1)
-            self.so.setblocking(False)
+            self.so.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     def bind(self):
 
-        self.so.bind(self.bind_info)
+        log(f'{self}: bindinging to: {self.addr_info}')
+        self.so.bind(self.addr_info)
 
     def connect(self):
 
-        self.so.connect(self.connect_info)
+        log(f'{self}: connecting to: {self.addr_info}')
+        self.so.connect(self.addr_info)
+        self.connected = True
 
     def listen(self):
 
         self.so.listen()
 
-    def accept(self):
+    def accept(self, fd):
 
-        new_addr_info = self.so.accept()
-        self.on_accept(new_addr_info)
+        so, addr_info = self.so.accept()
+        log(f'transport: on accept: {addr_info}')
+        self.on_accept(so, addr_info)
 
-    def on_accept(self, addr_info):
+    def on_accept(self, so, addr_info):
 
         log(f'transport: on accept: {addr_info}')
+        so.close()
 
     def recv(self):
 
@@ -82,6 +113,7 @@ class Transport(object):
 
     def send(self, msg):
 
+        logd(f'{self}: sending: {self.addr_info}: {msg}')
         return self.so.send(msg)
 
     def fileno(self):
@@ -101,18 +133,22 @@ class Transport(object):
         if fd == self.so.fileno():
             data = self.recv()
             if not len(data):
-                self.on_disconnect()
+                self.on_disconnect(self)
                 self.close()
             else:
                 self.on_data(data, False)
         else:
             loge(f'transport: fd mismatch: {fd} versus {self.so.fileno()}')
 
+    def on_disconnect(self, me):
+
+        pass
+
     def on_data(self, data, bcast):
 
         ret = None
         if data.startswith(b'type:kv '):
-            ret = self.kl.recv_kv(data, bcast)
+            ret = self.kl.recv_kv(data, bcast, transport=self)
         elif not bcast and data.startswith(b'type:blob '):
             ret = self.kl.on_blob(data)
 
@@ -126,6 +162,7 @@ class Ethernet(Transport):
 
     ETH_P_ALL = 3
     proto = socket.htons(ETH_P_ALL)
+    connector = False
 
     etype = 0xfff1
     etype_s = struct.Struct('!H')
@@ -135,18 +172,20 @@ class Ethernet(Transport):
     eaddr_len = len(bcast)
     ehdr_len = eaddr_len * 2 + etype_len
 
-    def __init__(self, iface, *args, **kwargs):
+    def __init__(self, *args, **kwargs):
 
-        log(f'Ethernet: {iface}')
-        self.iface = iface
-        self.addr = ip.iface_get_mac(iface)
+        kwargs['out_going'] = False
+        Transport.__init__(self, *args, **kwargs)
+
+        self.iface = self.addr_info[0]
+        log(f'Ethernet: {self.iface}')
+        self.addr = ip.iface_get_mac(self.iface)
         if self.addr is None:
-            raise RuntimeError(f'iface[{iface}]: has no address')
-        if not ip.ip_link_set_promisc(iface):
-            raise RuntimeError(f'iface[{iface}]: could not be made promiscuous')
+            raise RuntimeError(f'iface[{self.iface}]: has no address')
+        if not ip.ip_link_set_promisc(self.iface):
+            raise RuntimeError(f'iface[{self.iface}]: could not be made promiscuous')
         log(f'address: {binascii.b2a_hex(self.addr)}')
 
-        Transport.__init__(self, *args, bind_info=(iface, 0))
         self.bind()
         self.src = self.bcast
 
@@ -185,4 +224,18 @@ class Ethernet(Transport):
 class Sctp(Transport):
 
     family = socket.AF_INET
-    type_ = socket.SOCK_SEQPACKET
+    type_ = socket.SOCK_STREAM
+    proto = socket.IPPROTO_SCTP
+    connector = True
+
+
+class Transports(enumhelper.EnumHelper):
+
+    Ethernet = 'Ethernet'
+    Sctp = 'Sctp'
+
+
+class RTransports(enumhelper.EnumHelper):
+
+    Ethernet = Ethernet
+    Sctp = Sctp

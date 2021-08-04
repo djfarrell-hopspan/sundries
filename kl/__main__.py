@@ -16,9 +16,14 @@ from . import transports
 def server_main(sys_args):
 
     log(f'server_main({sys_args})')
+    if sys_args.to is None:
 
-    enet_transport = transports.Ethernet(sys_args.iface, sys_args.name, connect_info=None, bind_info=(sys_args.iface, 0))
-    server_handler = klevent.make_kl_server_handler(sys_args.name, enet_transport)
+        loge(f'Need "--to" in server mode')
+        raise SystemExit(1)
+
+    transport_class = transports.RTransports.get(sys_args.transport).value
+    transport = transport_class(sys_args.name, addr_info=sys_args.addrinfo, out_going=True, to=sys_args.to.encode())
+    server_handler = klevent.make_kl_server_handler(sys_args.name, transport,)
     poller = eventio.Poller()
     poller.add_handler(server_handler)
     poller.run()
@@ -30,8 +35,9 @@ def client_main(sys_args):
 
     log(f'client_main({sys_args})')
 
-    enet_transport = transports.Ethernet(sys_args.iface, sys_args.name, connect_info=None, bind_info=(sys_args.iface, 0))
-    client_handler = klevent.make_kl_client_handler(sys_args.name, enet_transport)
+    transport_class = transports.RTransports.get(sys_args.transport).value
+    transport = transport_class(sys_args.name, addr_info=sys_args.addrinfo, out_going=False)
+    client_handler = klevent.make_kl_client_handler(sys_args.name, transport)
     poller = eventio.Poller()
     poller.add_handler(client_handler)
     poller.run()
@@ -65,6 +71,9 @@ parser.add_argument('--name', type=str, required=True, help='Name of what.')
 parser.add_argument('--rdir', type=str, default='./', help='Where to operate.')
 parser.add_argument('--mode', choices=kldetails.Modes.values(), default=kldetails.Modes.Server.value, help='Mode of the loader.')
 parser.add_argument('--iface', type=str, default='', help='Interface to use.')
+parser.add_argument('--transport', choices=transports.Transports.values(), required=True, help='Transport to use.')
+parser.add_argument('--addrinfo', type=str, required=True, help='Addrinfo for transport.')
+parser.add_argument('--to', type=str, default=None, help='Name of where to connect to.')
 parser.add_argument('--debug', default=False, action='store_true', help='Enable debug printing.')
 
 args = parser.parse_args(sys.argv[1:])

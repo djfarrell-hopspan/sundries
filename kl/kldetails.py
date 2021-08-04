@@ -106,6 +106,51 @@ class KernelLoader(object):
             b'__bcast__': self.my_transport,
         }
 
+        self.handlers = {
+        }
+
+        self.pingers = {}
+
+    def add_handler(self, transport=None, handler=None):
+
+        if handler is None:
+            return
+        if transport is None:
+            transport = self.my_transport
+        self.handlers[transport] = handler
+
+    @property
+    def to(self):
+
+        return self.my_transport.to
+
+    @property
+    def is_bcaster(self):
+
+        return not self.my_transport.connector
+
+    @property
+    def is_connected(self):
+
+        return self.my_transport.connected
+
+    def on_close(self, handler=None, transport=None):
+
+        logw(f'kl: closing: {handler}: {transport}')
+
+        for name, transport_ in list(self.transports.items()):
+            if transport_ is transport:
+                self.transports.pop(name)
+            try:
+                self.pingers.pop(name)
+            except KeyError:
+                pass
+
+        try:
+            self.handlers.pop(handler)
+        except KeyError:
+            pass
+
     def send_kv(self, cmd, tmsg):
 
         to_name = tmsg.get('to')
@@ -117,12 +162,18 @@ class KernelLoader(object):
 
         if to_name is None:
             loge(f'send_kv: send_kv: no "to"')
+        else:
+            log(f'send_kv: sending to: {to_name}')
 
         transport = None
         if to_name in self.transports:
             transport = self.transports.get(to_name)
+        elif self.is_connected:
+            transport = self.my_transport
+        elif self.is_bcaster:
+            transport = self.my_transport
         else:
-            loge(f'send_kv: no transport: {to_name}')
+            logw(f'send_kv: no transport: {to_name}')
             return None
 
         if isinstance(cmd, str):
@@ -205,7 +256,7 @@ class KernelLoader(object):
 
         return None
 
-    def recv_kv(self, data, bcast):
+    def recv_kv(self, data, bcast, transport=None):
 
         logd(f'recv_kv: data: {data}')
         split = data.split(b' ')
@@ -270,15 +321,17 @@ class KernelLoader(object):
                 logw(f'recv_kv: not all core msg: {set(cmsg.keys())}')
                 omsg = dict()
 
-        if bcast:
-            self.transports[name] = self.my_transport
+        if name not in self.transports and transport is not None:
+            logw(f'recv_kv: adding transport: {name}: {transport}: {transport.addr_info}')
+            self.transports[name] = transport
 
+        handler_obj = self.handlers.get(transport)
         cmd = omsg.get(b'cmd')
-        logd(f'recv_kv: cmd: {cmd}')
+        logd(f'recv_kv: cmd: {cmd}: handler: {handler_obj}')
         if isinstance(cmd, bytes):
             cmd = cmd.decode()
             name = name.decode()
-            handler = getattr(self, f'on_cmd_{cmd}', self.on_cmd_null)
+            handler = getattr(handler_obj, f'on_cmd_{cmd}', self.on_cmd_null)
             return handler(name, cmd, omsg)
 
         return None
@@ -372,7 +425,17 @@ class KernelLoader(object):
         return False
 
 
-class ClientKL(KernelLoader):
+class KernelLoaderEvents(object):
+
+    def __getattr__(self, name):
+
+        if hasattr(self.subject, name):
+            return getattr(self.subject, name)
+
+        raise AttributeError(f'KernelLoader: {name}')
+
+
+class ClientStartupEvents(KernelLoaderEvents):
 
     def on_cmd_hello(self, from_name, cmd, msg):
 
@@ -405,6 +468,23 @@ class ClientKL(KernelLoader):
 
         return None
 
+    def send_hello_ack(self, to_name, tkey):
+
+        _cmd = 'send_hello_ack'
+        msg = {
+            b'to': to_name,
+            b'tkey': tkey,
+        }
+
+        logd(f'client[{self.name}]: to[{to_name}]: {_cmd}: to temporal pkey: {tkey}') 
+        log(f'client[{self.name}]: to[{to_name}]: {_cmd}') 
+
+        return self.send_kv(b'hello_ack', msg)
+
+
+class ClientRunningEvents(KernelLoaderEvents):
+
+
     def send_ping(self, to_name):
 
         _cmd = 'send_ping'
@@ -420,7 +500,7 @@ class ClientKL(KernelLoader):
     def on_cmd_pong(self, from_name, cmd, msg):
 
         _cmd = 'on_cmd_pong'
-        log(f'server[{self.name}]: {_cmd}: from[{from_name}]')
+        log(f'client[{self.name}]: {_cmd}: from[{from_name}]')
 
         self.on_pong(from_name)
 
@@ -429,29 +509,16 @@ class ClientKL(KernelLoader):
     def on_pong(self, from_name):
 
         _cmd = 'on_pong'
-        log(f'server[{self.name}]: {_cmd}: from[{from_name}]')
+        log(f'client[{self.name}]: {_cmd}: from[{from_name}]')
 
         return None
-
-    def send_hello_ack(self, to_name, tkey):
-
-        _cmd = 'send_hello_ack'
-        msg = {
-            b'to': to_name,
-            b'tkey': tkey,
-        }
-
-        logd(f'client[{self.name}]: to[{to_name}]: {_cmd}: to temporal pkey: {tkey}') 
-        log(f'client[{self.name}]: to[{to_name}]: {_cmd}') 
-
-        return self.send_kv(b'hello_ack', msg)
 
     def on_has_server(self, to_name):
 
         self.send_ping(to_name)
 
 
-class ServerKL(KernelLoader):
+class ServerRunningEvents(KernelLoaderEvents):
 
     def on_cmd_ping(self, from_name, cmd, msg):
 
@@ -477,10 +544,13 @@ class ServerKL(KernelLoader):
 
         return self.send_kv(b'pong', msg)
 
+
+class ServerStartupEvents(KernelLoaderEvents):
+
     def send_hello(self):
 
         msg = {
-            b'to': b'__bcast__',
+            b'to': self.to,
         }
 
         self.send_kv(b'hello', msg)

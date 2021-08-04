@@ -17,7 +17,7 @@ logd = functools.partial(print, 'debug  :')
 
 def set_logfns(i, w, e, d): 
 
-    log('setting log functions: {__name__}, {i}, {w}, {e}, {d}')
+    log(f'setting log functions: {__name__}, {i}, {w}, {e}, {d}')
 
     enumhelper.set_logfns(i, w, e, d)
     eventio.set_logfns(i, w, e, d)
