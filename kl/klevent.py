@@ -3,7 +3,9 @@ import functools
 import time
 
 import eventio
+from . import clientevents
 from . import kldetails
+from . import serverevents
 
 
 log =  functools.partial(print, 'info   :')
@@ -58,7 +60,7 @@ class KLHandler(eventio.Handler):
         self.poller.add_timeout(self.on_check_pingers, 0.25)
 
 
-class ServerKLHandler(KLHandler, kldetails.ServerStartupEvents, kldetails.ServerRunningEvents):
+class ServerKLHandler(KLHandler, serverevents.ServerStartupEvents, serverevents.ServerRunningEvents):
 
     def on_run(self):
 
@@ -73,7 +75,7 @@ class ServerKLHandler(KLHandler, kldetails.ServerStartupEvents, kldetails.Server
 
         self.pingers[k] = time.monotonic()
 
-class ClientEvents(kldetails.ClientStartupEvents, kldetails.ClientRunningEvents):
+class ClientEvents(clientevents.ClientStartupEvents, clientevents.ClientRunningEvents):
 
     def on_pong(self, from_name):
 
