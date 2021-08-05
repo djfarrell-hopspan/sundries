@@ -4,9 +4,10 @@ import time
 
 import eventio
 from . import clientevents
-from . import events
 from . import kldetails
+from . import pingevents
 from . import serverevents
+from . import startupevents
 
 
 log =  functools.partial(print, 'info   :')
@@ -35,20 +36,12 @@ class BaseKLHandler(object):
         logw(f'BaseKLHandler.__init__: {subject}')
 
         self.subject = subject
-        self.ping = events.Ping(self)
-        self.pong = self.ping.ponger
-        self.hello = events.Hello(self)
-        self.hello_ack = self.hello.acker
-        self.hello_done = self.hello_ack.doner
+
+        self.event_set = \
+                pingevents.get_events(self) | \
+                startupevents.get_events(self)
 
         self.events = {}
-        self.event_set = {
-            self.ping,
-            self.pong,
-            self.hello,
-            self.hello_ack,
-            self.hello_done,
-        }
         for event in self.event_set:
             self.events[event.name] = event
 
