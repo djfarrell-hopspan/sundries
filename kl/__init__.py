@@ -25,14 +25,19 @@ def set_logfns(i, w, e, d):
 
     log(f'setting log functions: {__name__}, {i}, {w}, {e}, {d}')
 
-    enumhelper.set_logfns(i, w, e, d)
-    eventio.set_logfns(i, w, e, d)
-    kldetails.set_logfns(i, w, e, d)
-    klevent.set_logfns(i, w, e, d)
-    ip.set_logfns(i, w, e, d)
-    events.set_logfns(i, w, e, d)
-    startupevents.set_logfns(i, w, e, d)
-    pingevents.set_logfns(i, w, e, d)
-    serverevents.set_logfns(i, w, e, d)
-    clientevents.set_logfns(i, w, e, d)
-    transports.set_logfns(i, w, e, d)
+    modules = {
+        enumhelper,
+        eventio,
+        kldetails,
+        klevent,
+        ip,
+        events,
+        startupevents,
+        pingevents,
+        serverevents,
+        clientevents,
+        transports,
+    }
+
+    for m in modules:
+        m.set_logfns(i, w, e, d)
