@@ -17,6 +17,8 @@ echo "time=$(timer_get_uptime)"
 ip -6 neigh
 echo '*******************rejects'
 echo "time=$(timer_get_uptime)"
+set +e
 dmesg -c | grep -i 'reject '
+set -e
 echo '*******************done'
 

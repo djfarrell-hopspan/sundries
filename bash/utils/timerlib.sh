@@ -1,4 +1,5 @@
 
+set -e
 
 function timer_get_uptime() {
 	head -n 1 /proc/uptime | awk '{ print $1 }'
