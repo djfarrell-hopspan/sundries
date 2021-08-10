@@ -1,4 +1,5 @@
 
+import collections
 import enum
 import logging
 import numpy
@@ -7,6 +8,130 @@ import sys
 import time
 
 import eventio
+
+
+class ConnieDB(object):
+
+    db_dir_name = 'connie_db'
+
+    FiveTuple = collections.namedtuple('FiveTuple', ['proto', 'src', 'dst', 'sport', 'dport'])
+    FiveTupleKeys = set(k.encode() for k in FiveTuple._fields)
+    DirTuple = collections.namedtuple('DirTuple', ['src', 'dst', 'sport', 'dport', 'packets', 'bytes'])
+    DirTupleKeys = set(k.encode() for k in DirTuple._fields)
+    FullTuple = collections.namedtuple('FullTuple', [
+        'previous_second',
+        'second',
+        'proto',
+        'src',
+        'dst',
+        'sport',
+        'dport',
+        'start_rx_bytes',
+        'end_rx_bytes',
+        'start_tx_bytes',
+        'end_tx_bytes',
+        'start_rx_packets',
+        'end_rx_packets',
+        'start_tx_packets',
+        'end_tx_packets'
+    ])
+
+    four_tuple_protos = {b'udp', b'tcp', b'sctp'}
+    all_protos = four_tuple_protos | {b'icmp'}
+
+    def __init__(self, connie, track):
+
+        try:
+            os.mkdir(os.path.join('./', self.db_dir_name))
+        except IOError:
+            pass
+        except OSError:
+            pass
+
+        self.track = tuple(track.encode().split(b',')) if track else None
+        self.connie = connie
+        self.connie.on_conntrack_data = self.on_conntrack_data
+        self.previous_connections = {}
+        self.connections = {}
+
+    def to_kv(self, line):
+
+        logd(f'to_kv: {line}')
+        ret = {}
+        for part in line.split():
+            if part.count(b'=') == 1:
+                k, v = part.split(b'=')
+                ret[k] = v
+        logd(f'to_kv: {ret}')
+
+        return ret
+
+    def on_conntrack_data(self, when, lines):
+
+        log(f'number of connections: {len(self.connections)}')
+
+        previous_connections = set(self.connections.keys())
+
+        self.previous_connections.clear()
+        self.previous_connections.update(self.connections)
+        self.connections.clear()
+
+        number_skipped = 0
+        for line in lines:
+            src1 = line.find(b'src')
+            src2 = line.find(b'src', src1 + 1)
+
+            if not -1 in {src1, src2}:
+                pre_split = line[:src1].split()
+                if len(pre_split) >= 5:
+                    proto = pre_split[2]
+                    if proto in self.all_protos:
+                        originator = self.to_kv(line[src1:src2])
+                        o_src = originator.get(b'src')
+                        if not o_src or (self.track and not o_src.startswith(self.track)):
+                            number_skipped += 1
+                            continue
+                        destinator = self.to_kv(line[src2:])
+                        if proto in self.four_tuple_protos:
+                            ftd = {k: originator.get(k.encode()) for k in self.FiveTuple._fields}
+                            logd(f'{ftd}')
+                            ftd.update({'proto': proto})
+                            logd(f'{ftd}')
+                            o_five_tuple = self.FiveTuple(**ftd)
+                            o_dir_tuple = self.DirTuple(**{k: originator.get(k.encode()) for k in self.DirTuple._fields})
+                            d_dir_tuple = self.DirTuple(**{k: destinator.get(k.encode()) for k in self.DirTuple._fields})
+                            prev_full_tuple = self.previous_connections.get(o_five_tuple,
+                                self.FullTuple(*((None, when - 1,) + (None,) * 5  + (0,) * 8)))
+                            full_tuple = self.FullTuple(
+                                previous_second=prev_full_tuple.second,
+                                second=when,
+                                proto=o_five_tuple.proto.decode(),
+                                src=o_five_tuple.src.decode(),
+                                dst=o_five_tuple.dst.decode(),
+                                sport=int(o_five_tuple.sport),
+                                dport=int(o_five_tuple.dport),
+                                start_rx_bytes=int(prev_full_tuple.end_rx_bytes),
+                                start_rx_packets=int(prev_full_tuple.end_rx_packets),
+                                end_rx_bytes=int(d_dir_tuple.bytes),
+                                end_rx_packets=int(d_dir_tuple.packets),
+                                start_tx_bytes=int(prev_full_tuple.end_tx_bytes),
+                                start_tx_packets=int(prev_full_tuple.end_tx_packets),
+                                end_tx_bytes=int(o_dir_tuple.bytes),
+                                end_tx_packets=int(o_dir_tuple.packets),
+                            )
+                            self.connections[o_five_tuple] = full_tuple
+
+                            logd(f'{full_tuple}')
+
+        connections = set(self.connections.keys())
+        common = previous_connections & connections
+        finished = previous_connections - common
+        new = connections - common
+        log(f'number of skipped connections: {number_skipped}')
+        log(f'number of new connection: {len(new)}')
+        log(f'number of finished connection: {len(finished)}')
+
+
 
 
 class ConnieHandler(eventio.PopenHandler):
@@ -181,6 +306,11 @@ class ConnieHandler(eventio.PopenHandler):
         self.iteration_second = int(self.major_mode_times[self.prev_mode][1] - offset)
 
         log(f'{self.name}: finished {self.prev_mode.value}, {self.iteration_second}')
+        self.on_conntrack_data(self.iteration_second, self.major_mode_lines[self.prev_mode])
+
+    def on_conntrack_data(self, when, data):
+
+        pass
 
     def on_IpPreTime(self):
 
@@ -222,10 +352,11 @@ class ConnieHandler(eventio.PopenHandler):
 
         pass
 
-def main_connie(name, cmd_args):
+def main_connie(name, track, cmd_args):
 
     poller = eventio.Poller()
     connie = ConnieHandler(name, cmd_args)
+    connie_db = ConnieDB(connie, track)
     poller.add_handler(connie)
 
     poller.run()
@@ -239,16 +370,17 @@ def main(args, cmd_args):
     log(f'{name}: changing to dir: {args.dbdir}')
     os.chdir(args.dbdir)
 
-    return main_connie(name, cmd_args)
+    return main_connie(name, args.track, cmd_args)
 
 
 if __name__ == '__main__':
 
     import argparse
 
-    parser = argparse.ArgumentParser(description='Kernel loader.')
+    parser = argparse.ArgumentParser(description='Connection tracker.')
     parser.add_argument('--name', type=str, required=True, help='Name of this connie instance.')
     parser.add_argument('--dbdir', type=str, default='./', help='Where to store the DB.')
+    parser.add_argument('--track', type=str, default=None, help='Which subnets to track (as source).')
     parser.add_argument('--debug', default=False, action='store_true', help='Enable debug printing.')
 
     args, cmd_args = parser.parse_known_args()
