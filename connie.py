@@ -1,5 +1,6 @@
 
 import collections
+import datetime
 import enum
 import logging
 import numpy
@@ -18,7 +19,7 @@ class ConnieDB(object):
     FiveTupleKeys = set(k.encode() for k in FiveTuple._fields)
     DirTuple = collections.namedtuple('DirTuple', ['src', 'dst', 'sport', 'dport', 'packets', 'bytes'])
     DirTupleKeys = set(k.encode() for k in DirTuple._fields)
-    FullTuple = collections.namedtuple('FullTuple', [
+    FullTuple_ = collections.namedtuple('FullTuple', [
         'previous_second',
         'second',
         'proto',
@@ -35,6 +36,72 @@ class ConnieDB(object):
         'start_tx_packets',
         'end_tx_packets'
     ])
+
+    class FullTuple(FullTuple_):
+
+        TotalDiff = collections.namedtuple('TotalDiff', [
+            'rx_Mbps',
+            'rx_pps',
+            'tx_Mbps',
+            'tx_pps',
+            'duration',
+            'rx_bytes',
+            'tx_bytes',
+            'rx_packets',
+            'tx_packets',
+        ])
+
+        add_fields = {
+            'start_rx_bytes',
+            'start_tx_bytes',
+            'end_rx_bytes',
+            'end_tx_bytes',
+            'start_rx_packets',
+            'start_tx_packets',
+            'end_rx_packets',
+            'end_tx_packets',
+        }
+
+        def __add__(self, rhs):
+
+            new_tuple = self.__class__(**{
+                k: getattr(self, k) if k not in self.add_fields else \
+                        getattr(self, k) + getattr(rhs, k) \
+                            for k in self._fields})
+
+            return new_tuple
+
+        def __iadd__(self, rhs):
+
+            new_tuple = self.__add__(rhs)
+
+            return new_tuple
+
+        def has_change(self):
+
+            return \
+                self.start_rx_bytes != self.end_rx_bytes \
+                or self.start_tx_bytes != self.end_tx_bytes
+
+        def total_diff(self, previous):
+
+            seconds = float(self.second - previous.second)
+            rx_B = self.end_rx_bytes - self.start_rx_bytes
+            tx_B = self.end_tx_bytes - self.start_tx_bytes
+            rx_p = self.end_rx_packets - self.start_rx_packets
+            tx_p = self.end_tx_packets - self.start_tx_packets
+
+            return self.TotalDiff(
+                rx_Mbps=(8 * rx_B / seconds) / 2**20,
+                tx_Mbps=(8 * tx_B / seconds) / 2**20,
+                rx_pps=rx_p / seconds,
+                tx_pps=tx_p / seconds,
+                duration=seconds,
+                rx_bytes=rx_B,
+                tx_bytes=tx_B,
+                rx_packets=rx_p,
+                tx_packets=tx_p,
+            )
 
     four_tuple_protos = {b'udp', b'tcp', b'sctp'}
     all_protos = four_tuple_protos | {b'icmp'}
@@ -53,6 +120,8 @@ class ConnieDB(object):
         self.connie.on_conntrack_data = self.on_conntrack_data
         self.previous_connections = {}
         self.connections = {}
+        self.connections_by_ip = {}
+        self.total = None
 
     def to_kv(self, line):
 
@@ -88,7 +157,11 @@ class ConnieDB(object):
                     if proto in self.all_protos:
                         originator = self.to_kv(line[src1:src2])
                         o_src = originator.get(b'src')
-                        if not o_src or (self.track and not o_src.startswith(self.track)):
+                        o_dst = originator.get(b'dst')
+                        if not o_src or not o_dst \
+                                or (self.track and \
+                                    (not o_src.startswith(self.track) \
+                                        or o_dst.startswith(self.track))):
                             number_skipped += 1
                             continue
                         destinator = self.to_kv(line[src2:])
@@ -131,7 +204,50 @@ class ConnieDB(object):
         log(f'number of new connection: {len(new)}')
         log(f'number of finished connection: {len(finished)}')
 
+        if self.total is None:
+            self.total = self.FullTuple(*((when - 2, when - 1,) + (None,) * 5 + (0,) * 8))
+        new_total = self.FullTuple(*((self.total.second, when,) + (None,) * 5 + (0,) * 8))
+        for c in connections:
 
+            c_ = self.connections.get(c)
+            new_total += c_
+            existing_by_ip = self.connections_by_ip.get(c.src)
+
+            if existing_by_ip is not None and c_.has_change():
+                self.connections_by_ip[c.src] += c_
+            else:
+                self.connections_by_ip[c.src] = c_
+        for f in finished:
+            try:
+                self.connections_by_ip.pop(c)
+            except KeyError:
+                pass
+
+        total_diff = new_total.total_diff(self.total)
+        log(f'totals: {total_diff}')
+        self.total = new_total
+
+        self.update_conntrack_db(when, new, finished)
+
+    def update_conntrack_db(self, when, new, finished):
+
+        udt = datetime.datetime.utcfromtimestamp(float(when))
+
+        year = f'{udt.year:04d}'
+        month = f'{udt.month:02d}'
+        day = f'{udt.day:1d}'
+        hour = f'{udt.hour:02d}'
+        minute = f'{udt.minute:02d}'
+
+        dir_path = os.path.join('./',
+            year,
+            year + month,
+            year + month + day,
+            year + month + day + hour,
+            year + month + day + year + minute + 'UTC',
+        )
+
+        log(f'when dir: {when}, {dir_path}')
 
 
 class ConnieHandler(eventio.PopenHandler):
@@ -303,9 +419,14 @@ class ConnieHandler(eventio.PopenHandler):
         self.conntrack_times_offsets.append(self.major_mode_times[self.prev_mode][1] % 1)
         self.conntrack_times_offsets = self.conntrack_times_offsets[:20]
         offset = numpy.median(self.conntrack_times_offsets)
-        self.iteration_second = int(self.major_mode_times[self.prev_mode][1] - offset)
+        log(f'iteration offset: {offset}')
+        old_second = self.iteration_second
+        self.iteration_second = int(self.major_mode_times[self.prev_mode][1] - offset + 0.5)
 
-        log(f'{self.name}: finished {self.prev_mode.value}, {self.iteration_second}')
+        log(f'{self.name}: iteration second: {self.prev_mode.value}, {self.iteration_second}')
+        if self.iteration_second and old_second and (self.iteration_second - old_second != 1):
+            loge(f'bad iteration second change: {self.iteration_second - old_second}')
+
         self.on_conntrack_data(self.iteration_second, self.major_mode_lines[self.prev_mode])
 
     def on_conntrack_data(self, when, data):
