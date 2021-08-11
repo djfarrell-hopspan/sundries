@@ -35,6 +35,22 @@ class ConnieDB(object):
         'end_rx_packets',
         'start_tx_packets',
         'end_tx_packets'
+    ], defaults=[
+        0,
+        0,
+        None,
+        None,
+        None,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
     ])
 
     class FullTuple(FullTuple_):
@@ -62,6 +78,13 @@ class ConnieDB(object):
             'end_tx_packets',
         }
 
+        diff_pairs = {
+            ('start_rx_bytes', 'end_rx_bytes'),
+            ('start_tx_bytes', 'end_tx_bytes'),
+            ('start_rx_packets', 'end_rx_packets'),
+            ('start_tx_packets', 'end_tx_packets'),
+        }
+
         def __add__(self, rhs):
 
             new_tuple = self.__class__(**{
@@ -77,6 +100,51 @@ class ConnieDB(object):
 
             return new_tuple
 
+        def __lt__(self, rhs):
+
+            return ((self.end_tx_bytes - self.start_tx_bytes) \
+                    + (self.end_rx_bytes - self.start_rx_bytes)) \
+                        < ((rhs.end_tx_bytes - rhs.start_tx_bytes) \
+                            + (rhs.end_rx_bytes - rhs.start_rx_bytes))
+
+        def adjust_diff(self, rhs):
+
+            spte_packets = self.end_tx_packets
+            spre_packets = self.end_rx_packets
+            rpte_packets = rhs.end_tx_packets
+            rpre_packets = rhs.end_rx_packets
+
+            sbte_bytes = self.end_tx_bytes
+            sbre_bytes = self.end_rx_bytes
+            rbte_bytes = rhs.end_tx_bytes
+            rbre_bytes = rhs.end_rx_bytes
+
+            spts_packets = self.start_tx_packets
+            sprs_packets = self.start_rx_packets
+            rpts_packets = rhs.start_tx_packets
+            rprs_packets = rhs.start_rx_packets
+
+            sbts_bytes = self.start_tx_bytes
+            sbrs_bytes = self.start_rx_bytes
+            rbts_bytes = rhs.start_tx_bytes
+            rbrs_bytes = rhs.start_rx_bytes
+
+            new_tuple = self.__class__(
+                second=rhs.second,
+                previous_second=rhs.previous_second,
+                src=self.src,
+                start_rx_bytes=sbre_bytes,
+                start_tx_bytes=sbte_bytes,
+                start_rx_packets=rpre_packets,
+                start_tx_packets=rpte_packets,
+                end_rx_bytes=sbre_bytes + rbre_bytes - rbrs_bytes,
+                end_tx_bytes=sbte_bytes + rbte_bytes - rbts_bytes,
+                end_rx_packets=spre_packets + rpre_packets - rprs_packets,
+                end_tx_packets=spte_packets + rpte_packets - rpts_packets,
+            )
+
+            return new_tuple
+
         def has_change(self):
 
             return \
@@ -86,6 +154,26 @@ class ConnieDB(object):
         def total_diff(self, previous):
 
             seconds = float(self.second - previous.second)
+            rx_B = self.end_rx_bytes - self.start_rx_bytes
+            tx_B = self.end_tx_bytes - self.start_tx_bytes
+            rx_p = self.end_rx_packets - self.start_rx_packets
+            tx_p = self.end_tx_packets - self.start_tx_packets
+
+            return self.TotalDiff(
+                rx_Mbps=(8 * rx_B / seconds) / 2**20,
+                tx_Mbps=(8 * tx_B / seconds) / 2**20,
+                rx_pps=rx_p / seconds,
+                tx_pps=tx_p / seconds,
+                duration=seconds,
+                rx_bytes=rx_B,
+                tx_bytes=tx_B,
+                rx_packets=rx_p,
+                tx_packets=tx_p,
+            )
+
+        def diff(self):
+
+            seconds = float(self.second - self.previous_second)
             rx_B = self.end_rx_bytes - self.start_rx_bytes
             tx_B = self.end_tx_bytes - self.start_tx_bytes
             rx_p = self.end_rx_packets - self.start_rx_packets
@@ -118,10 +206,17 @@ class ConnieDB(object):
         self.track = tuple(track.encode().split(b',')) if track else None
         self.connie = connie
         self.connie.on_conntrack_data = self.on_conntrack_data
+        self.connie.on_neigh_data = self.on_neigh_data
+        self.connie.on_done = self.on_done
         self.previous_connections = {}
         self.connections = {}
         self.connections_by_ip = {}
         self.total = None
+        self.ips = {}
+        self.previous_ips = {}
+        self.new_connections = None
+        self.finished_connections = None
+        self.total_diff = None
 
     def to_kv(self, line):
 
@@ -134,6 +229,18 @@ class ConnieDB(object):
         logd(f'to_kv: {ret}')
 
         return ret
+
+    def on_done(self, when):
+
+        sorted_connections = sorted(self.connections.items(), key=lambda x: x[1])
+        log('*' * 80)
+        for _, connection in sorted_connections[-5:]:
+            diff = connection.diff()
+            log(f'top connection: rx rate: {diff.rx_Mbps:7.3f}, tx rate: {diff.tx_Mbps:7.3f}, {connection.src}->{connection.dst} ')
+
+        log('*' * 80)
+
+        self.update_conntrack_db(when)
 
     def on_conntrack_data(self, when, lines):
 
@@ -204,32 +311,60 @@ class ConnieDB(object):
         log(f'number of new connection: {len(new)}')
         log(f'number of finished connection: {len(finished)}')
 
+        self.new_connections = new
+        self.finished_connections = finished
+
         if self.total is None:
             self.total = self.FullTuple(*((when - 2, when - 1,) + (None,) * 5 + (0,) * 8))
         new_total = self.FullTuple(*((self.total.second, when,) + (None,) * 5 + (0,) * 8))
+        self.connections_by_ip.clear()
         for c in connections:
 
             c_ = self.connections.get(c)
             new_total += c_
-            existing_by_ip = self.connections_by_ip.get(c.src)
 
+            existing_by_ip = self.connections_by_ip.get(c.src)
             if existing_by_ip is not None and c_.has_change():
-                self.connections_by_ip[c.src] += c_
+                self.connections_by_ip[c.src].adjust_diff(c_)
             else:
-                self.connections_by_ip[c.src] = c_
+                self.connections_by_ip[c.src] = self.FullTuple(
+                    src=c.src,
+                )
+
         for f in finished:
             try:
                 self.connections_by_ip.pop(c)
             except KeyError:
                 pass
 
-        total_diff = new_total.total_diff(self.total)
-        log(f'totals: {total_diff}')
+        self.total_diff = new_total.total_diff(self.total)
+        log(f'totals: {self.total_diff}')
         self.total = new_total
+        
+    def on_neigh_data(self, when, lines):
 
-        self.update_conntrack_db(when, new, finished)
+        self.previous_ips.clear()
+        self.previous_ips.update(self.ips)
 
-    def update_conntrack_db(self, when, new, finished):
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 5:
+                ip = parts[0]
+                mac = parts[5]
+                if ip.startswith(self.track):
+                    self.ips[ip] = mac
+
+        previous = set(self.previous_ips.keys()) 
+        current = set(self.ips.keys())
+        common = current & previous
+        new = current - common
+        old = previous - common
+
+        log(f'number of ip addresses: {len(current)}')
+        log(f'number of new ip addresses: {len(new)}')
+        log(f'number of old ip addresses: {len(old)}')
+
+    def update_conntrack_db(self, when):
 
         udt = datetime.datetime.utcfromtimestamp(float(when))
 
@@ -239,13 +374,20 @@ class ConnieDB(object):
         hour = f'{udt.hour:02d}'
         minute = f'{udt.minute:02d}'
 
-        dir_path = os.path.join('./',
+        dir_path = os.path.join('.',
             year,
             year + month,
             year + month + day,
             year + month + day + hour,
             year + month + day + year + minute + 'UTC',
         )
+
+        connections_dir = os.path.join(dir_path, 'connections')
+        rates_dir = os.path.join(dir_path, 'rates')
+        ends_dir = os.path.join(dir_path, 'ends')
+        latest_second_path = os.path.join('.', 'latest')
+        total_rate_path = os.path.join('.', 'total_rate')
+        total_ip_rate_path = os.path.join('.', 'total_ip_rates')
 
         log(f'when dir: {when}, {dir_path}')
 
@@ -406,6 +548,8 @@ class ConnieHandler(eventio.PopenHandler):
                         self.major_mode_lines[self.prev_mode].clear()
                     except Exception as e:
                         loge(f'{self.name}: error clearing mode line list: {e}')
+            if self.__mode == self.Modes.Done:
+                self.on_Done()
 
     def on_ConntrackPreTime(self):
 
@@ -456,6 +600,11 @@ class ConnieHandler(eventio.PopenHandler):
     def on_Neigh(self):
 
         log(f'{self.name}: finished {self.prev_mode.value}, {self.iteration_second}')
+        self.on_neigh_data(self.iteration_second, self.major_mode_lines[self.prev_mode])
+
+    def on_neigh_data(self, when, lines):
+
+        pass
 
     def on_RejectsPreTime(self):
 
@@ -466,6 +615,11 @@ class ConnieHandler(eventio.PopenHandler):
         log(f'{self.name}: finished {self.prev_mode.value}, {self.iteration_second}')
 
     def on_Done(self):
+
+        log(f'{self.name}: finished {self.mode.value}, {self.iteration_second}')
+        self.on_done(self.iteration_second)
+
+    def on_done(self, when):
 
         pass
 
