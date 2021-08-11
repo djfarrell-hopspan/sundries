@@ -14,7 +14,7 @@ echo "time=$(timer_get_uptime)"
 cat /proc/net/arp
 echo '*******************neigh'
 echo "time=$(timer_get_uptime)"
-ip -6 neigh
+ip neigh
 echo '*******************rejects'
 echo "time=$(timer_get_uptime)"
 set +e
